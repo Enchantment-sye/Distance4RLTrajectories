@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "reachability-metrics"
+version = "0.1.0"
+description = "Sklearn-style reachability and trajectory similarity metrics for offline MDP trajectory data."
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.9"
+authors = [
+  {name = "reachability-metrics contributors"}
+]
+dependencies = [
+  "numpy",
+  "scipy",
+  "scikit-learn",
+  "matplotlib",
+  "pandas",
+  "tqdm",
+]
+
+[project.optional-dependencies]
+torch = ["torch"]
+d4rl = ["minari", "gymnasium"]
+optimal_transport = ["pot"]
+t2vec = ["torch", "h5py"]
+dev = ["pytest", "ruff", "mypy"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"

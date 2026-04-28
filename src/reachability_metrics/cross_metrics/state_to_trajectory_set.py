@@ -1,0 +1,38 @@
+"""State-to-trajectory-set distance."""
+
+from __future__ import annotations
+
+from typing import Any
+
+import numpy as np
+
+from reachability_metrics.utils import softmin
+
+
+class StateToTrajectorySetDistance:
+    """Aggregate state-to-trajectory distances over a set of trajectories."""
+
+    def __init__(self, state_to_trajectory_metric: Any, aggregation: str = "min", softmin_tau: float = 1.0) -> None:
+        self.state_to_trajectory_metric = state_to_trajectory_metric
+        self.aggregation = aggregation
+        self.softmin_tau = softmin_tau
+
+    def fit(self, trajectory_sets: list[list[Any]]) -> "StateToTrajectorySetDistance":
+        flat = [traj for group in trajectory_sets for traj in group]
+        self.state_to_trajectory_metric.fit(flat)
+        self.trajectory_sets_ = trajectory_sets
+        return self
+
+    def pairwise_distance(self, states: Any, trajectory_sets: list[list[Any]] | None = None) -> np.ndarray:
+        sets = self.trajectory_sets_ if trajectory_sets is None else trajectory_sets
+        rows = []
+        for group in sets:
+            d = self.state_to_trajectory_metric.pairwise_distance(states, group)
+            if self.aggregation == "mean":
+                rows.append(np.mean(d, axis=1))
+            elif self.aggregation == "softmin":
+                rows.append(softmin(d, tau=self.softmin_tau, axis=1))
+            else:
+                rows.append(np.min(d, axis=1))
+        return np.stack(rows, axis=1).astype(np.float32)
+
