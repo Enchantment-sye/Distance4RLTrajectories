@@ -19,13 +19,14 @@ dependencies = [
   "matplotlib",
   "pandas",
   "tqdm",
+  "torch",
 ]
 
 [project.optional-dependencies]
 torch = ["torch"]
 d4rl = ["minari", "gymnasium"]
 optimal_transport = ["pot"]
-t2vec = ["torch", "h5py"]
+t2vec = ["h5py"]
 dev = ["pytest", "ruff", "mypy"]
 
 [tool.setuptools.packages.find]

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+import torch
 
 from reachability_metrics.trajectory_metrics import (
     DTWDistance,
@@ -36,8 +37,8 @@ def test_classical_trajectory_distances() -> None:
         metric.fit(trajectories)
         d = metric.pairwise_distance(trajectories)
         assert d.shape == (3, 3)
-        assert np.all(np.isfinite(d))
-        assert np.allclose(np.diag(d), 0.0, atol=1e-5)
+        assert torch.all(torch.isfinite(d))
+        torch.testing.assert_close(torch.diag(d), torch.zeros(3), atol=1e-5, rtol=1e-5)
 
 
 def test_idk_and_gdk_handle_variable_lengths() -> None:
@@ -48,3 +49,21 @@ def test_idk_and_gdk_handle_variable_lengths() -> None:
     assert idk.pairwise_distance(trajectories).shape == (3, 3)
     assert gdk.pairwise_distance(trajectories).shape == (3, 3)
 
+
+def test_kme_distance_modes_and_nystrom() -> None:
+    trajectories = _trajs()
+    gdk_cos = GDKTrajectoryDistance(distance_mode="cosine", feature_approximation="nystrom", num_landmarks=4).fit(trajectories)
+    d_cos = gdk_cos.pairwise_distance(trajectories)
+    assert d_cos.shape == (3, 3)
+    assert torch.all(torch.isfinite(d_cos))
+
+    idk = IDKTrajectoryDistance(
+        ensemble_size=6,
+        subsample_size=3,
+        temperature=0.05,
+        device="cpu",
+        distance_mode="one_minus_partition_similarity",
+    ).fit(trajectories)
+    d_idk = idk.pairwise_distance(trajectories)
+    assert d_idk.shape == (3, 3)
+    assert torch.all(torch.isfinite(d_idk))

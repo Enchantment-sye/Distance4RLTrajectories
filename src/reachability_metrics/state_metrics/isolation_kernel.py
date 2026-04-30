@@ -2,12 +2,9 @@
 
 from __future__ import annotations
 
-import math
 from typing import Any
 
-import numpy as np
-
-from reachability_metrics.utils import as_2d_array, block_slices, resolve_device
+from reachability_metrics.torch_utils import as_2d_tensor, block_slices, resolve_torch_device
 from .base import StateMetric
 
 
@@ -27,14 +24,13 @@ class SoftIsolationKernel:
         device: str = "auto",
         random_state: int = 0,
     ) -> None:
-        import torch
-
         self.input_dim = int(input_dim)
         self.ensemble_size = int(ensemble_size)
         self.subsample_size = int(subsample_size)
         self.temperature = float(temperature)
-        self.device = resolve_device(device)
+        self.device = resolve_torch_device(device)
         self.random_state = int(random_state)
+        torch = __import__("torch")
         self.anchors = torch.empty(
             self.ensemble_size * self.subsample_size,
             self.input_dim,
@@ -44,9 +40,8 @@ class SoftIsolationKernel:
 
     def fit(self, data: Any) -> "SoftIsolationKernel":
         """Sample anchors from a training state pool."""
-        import torch
-
-        values = torch.as_tensor(data, dtype=torch.float32, device=self.device)
+        torch = __import__("torch")
+        values = as_2d_tensor(data, dtype=torch.float32, device=self.device, name="data")
         if values.ndim != 2:
             raise ValueError(f"data must be 2D, got {tuple(values.shape)}")
         if values.shape[0] == 0:
@@ -63,9 +58,7 @@ class SoftIsolationKernel:
         import torch
         import torch.nn.functional as F
 
-        values = torch.as_tensor(x, dtype=torch.float32, device=self.device)
-        if values.ndim != 2:
-            raise ValueError(f"x must be 2D, got {tuple(values.shape)}")
+        values = as_2d_tensor(x, dtype=torch.float32, device=self.device, name="x")
         dist = torch.cdist(values, self.anchors, p=2).view(values.shape[0], self.ensemble_size, self.subsample_size)
         assign = F.softmax(-dist / max(self.temperature, 1e-8), dim=-1)
         return assign.reshape(values.shape[0], self.ensemble_size * self.subsample_size)
@@ -91,22 +84,30 @@ class IsolationKernelDistance(StateMetric):
         subsample_size: int = 32,
         temperature: float = 0.01,
         device: str = "auto",
+        dtype: str = "float32",
         batch_size: int = 4096,
         block_size: int = 4096,
         feature_mode: str = "soft",
         random_state: int = 0,
+        return_numpy: bool = False,
+        output_format: str | None = None,
     ) -> None:
+        super().__init__(
+            device=device,
+            dtype=dtype,
+            batch_size=batch_size,
+            block_size=block_size,
+            return_numpy=return_numpy,
+            output_format=output_format,
+        )
         self.ensemble_size = ensemble_size
         self.subsample_size = subsample_size
         self.temperature = temperature
-        self.device = device
-        self.batch_size = batch_size
-        self.block_size = block_size
         self.feature_mode = feature_mode
         self.random_state = random_state
 
     def fit(self, X: Any, y: Any = None) -> "IsolationKernelDistance":
-        x = as_2d_array(X, dtype=np.float32, name="X")
+        x = as_2d_tensor(X, dtype=self._dtype(), device=self._device(), name="X")
         if str(self.feature_mode).lower() != "soft":
             raise ValueError("Only feature_mode='soft' is implemented")
         self.n_features_in_ = int(x.shape[1])
@@ -115,13 +116,13 @@ class IsolationKernelDistance(StateMetric):
             ensemble_size=self.ensemble_size,
             subsample_size=self.subsample_size,
             temperature=self.temperature,
-            device=self.device,
+            device=x.device,
             random_state=self.random_state,
         ).fit(x)
         self.X_fit_ = x
         return self
 
-    def transform(self, X: Any, *, normalize: bool = False) -> np.ndarray:
+    def transform_tensor(self, X: Any, *, normalize: bool = False):
         """Encode states into IK features.
 
         If ``normalize=True`` features are divided by ``sqrt(ensemble_size)`` so
@@ -129,29 +130,37 @@ class IsolationKernelDistance(StateMetric):
         """
         if not hasattr(self, "kernel_"):
             raise RuntimeError("IsolationKernelDistance must be fitted")
-        import torch
-
-        x = as_2d_array(X, dtype=np.float32, name="X")
+        torch = __import__("torch")
+        x = as_2d_tensor(X, dtype=self._dtype(), device=self._device(), name="X")
         chunks = []
         with torch.no_grad():
             for start, end in block_slices(x.shape[0], int(self.batch_size)):
                 feat = self.kernel_.compute_ik_map(x[start:end])
                 if normalize:
-                    feat = feat / math.sqrt(float(self.ensemble_size))
-                chunks.append(feat.detach().cpu().numpy().astype(np.float32))
-        return np.concatenate(chunks, axis=0)
+                    feat = feat / (float(self.ensemble_size) ** 0.5)
+                chunks.append(feat.to(dtype=self._dtype()))
+        return torch.cat(chunks, dim=0)
 
-    def pairwise_similarity(self, X: Any, Y: Any | None = None) -> np.ndarray:
+    def transform(self, X: Any, *, normalize: bool = False):
+        return self._return(self.transform_tensor(X, normalize=normalize))
+
+    def pairwise_similarity_tensor(self, X: Any, Y: Any | None = None):
         if not hasattr(self, "kernel_"):
             self.fit(X)
         y_source = X if Y is None else Y
-        fx = self.transform(X, normalize=False)
-        fy = fx if Y is None else self.transform(y_source, normalize=False)
-        sim = np.empty((fx.shape[0], fy.shape[0]), dtype=np.float32)
+        fx = self.transform_tensor(X, normalize=False)
+        fy = fx if Y is None else self.transform_tensor(y_source, normalize=False)
+        torch = __import__("torch")
+        sim = torch.empty((fx.shape[0], fy.shape[0]), dtype=fx.dtype, device=fx.device)
         for start, end in block_slices(fx.shape[0], int(self.block_size)):
-            sim[start:end] = (fx[start:end] @ fy.T / float(self.ensemble_size)).astype(np.float32)
+            sim[start:end] = fx[start:end] @ fy.T / float(self.ensemble_size)
         return sim
 
-    def pairwise_distance(self, X: Any, Y: Any | None = None) -> np.ndarray:
-        return (1.0 - self.pairwise_similarity(X, Y)).astype(np.float32)
+    def pairwise_distance_tensor(self, X: Any, Y: Any | None = None):
+        return 1.0 - self.pairwise_similarity_tensor(X, Y)
 
+    def pairwise_similarity(self, X: Any, Y: Any | None = None):
+        return self._return(self.pairwise_similarity_tensor(X, Y))
+
+    def pairwise_distance(self, X: Any, Y: Any | None = None):
+        return self._return(self.pairwise_distance_tensor(X, Y))

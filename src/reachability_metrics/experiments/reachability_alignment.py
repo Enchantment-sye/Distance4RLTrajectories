@@ -16,17 +16,11 @@ from reachability_metrics.evaluation import (
     safe_pearson,
     safe_spearman,
 )
-from reachability_metrics.evaluation.reports import save_csv
+from reachability_metrics.experiments.artifacts import ArtifactWriter
 from reachability_metrics.experiments.proxy_ground_truth import empirical_h_reachability_scores
-from reachability_metrics.state_metrics import (
-    AdaptiveGaussianDistance,
-    EuclideanDistance,
-    GaussianKernelDistance,
-    IsolationKernelDistance,
-    MahalanobisDistance,
-    OneStepDynamicsDistance,
-)
-from reachability_metrics.utils import dataset_slug, ensure_dir
+from reachability_metrics.experiments.scorers import StateScoringContext, build_experiment_scorer
+from reachability_metrics.torch_utils import cpu_numpy
+from reachability_metrics.utils import dataset_slug
 from reachability_metrics.visualization.plots import plot_alignment_scatter, plot_relabel_bars
 
 
@@ -76,36 +70,6 @@ def _temporal_scores(episode_ids: np.ndarray, timesteps: np.ndarray, anchors: np
     return scores
 
 
-def _metric_scores(method: str, fit: np.ndarray, states: np.ndarray, anchors: np.ndarray, candidates: np.ndarray, cfg: ReachabilityAnalysisConfig, dataset: Any) -> np.ndarray:
-    x = states[anchors]
-    y = states[candidates]
-    if method == "euclidean":
-        return -EuclideanDistance().fit(fit).pairwise_distance(x, y)
-    if method == "gaussian":
-        return GaussianKernelDistance().fit(fit).pairwise_similarity(x, y)
-    if method == "adaptive_gaussian":
-        return AdaptiveGaussianDistance().fit(fit).pairwise_similarity(x, y)
-    if method == "mahalanobis":
-        return -MahalanobisDistance().fit(fit).pairwise_distance(x, y)
-    if method == "ik":
-        return IsolationKernelDistance(
-            ensemble_size=cfg.ik_ensemble_size,
-            subsample_size=cfg.ik_subsample_size,
-            temperature=cfg.ik_temperature,
-            device=cfg.ik_device,
-            batch_size=cfg.ik_batch_size,
-            random_state=cfg.seed,
-        ).fit(fit).pairwise_similarity(x, y)
-    if method == "temporal":
-        return _temporal_scores(dataset.episode_ids(), dataset.timesteps(), anchors, candidates)
-    if method == "dyn_1":
-        s0, s1 = dataset.transition_pairs()
-        if s0.shape[0] == 0:
-            return -EuclideanDistance().fit(fit).pairwise_distance(x, y)
-        return -OneStepDynamicsDistance().fit(s0, s1).pairwise_distance(x, y)
-    raise ValueError(method)
-
-
 def analyze_single_dataset(dataset_id: str, cfg: ReachabilityAnalysisConfig) -> dict[str, Any]:
     """Run alignment analysis for one dataset."""
 
@@ -116,9 +80,11 @@ def analyze_single_dataset(dataset_id: str, cfg: ReachabilityAnalysisConfig) -> 
         use_achieved_goal=True,
         synthetic_seed=cfg.seed,
     )
-    states = dataset.states()
-    timesteps = dataset.timesteps()
-    valid = np.flatnonzero(timesteps < dataset.episode_lengths()[dataset.episode_ids()] - cfg.horizon - 1)
+    states = cpu_numpy(dataset.states())
+    timesteps = cpu_numpy(dataset.timesteps())
+    episode_ids = cpu_numpy(dataset.episode_ids())
+    episode_lengths = cpu_numpy(dataset.episode_lengths())
+    valid = np.flatnonzero(timesteps < episode_lengths[episode_ids] - cfg.horizon - 1)
     if valid.size == 0:
         valid = np.arange(states.shape[0])
     anchors = rng.choice(valid, size=min(cfg.num_anchors, valid.size), replace=False)
@@ -135,8 +101,18 @@ def analyze_single_dataset(dataset_id: str, cfg: ReachabilityAnalysisConfig) -> 
     rows: list[dict[str, Any]] = []
     per_anchor: list[dict[str, Any]] = []
     first_scatter: str | None = None
+    context = StateScoringContext(
+        fit=fit,
+        states=states,
+        anchors=anchors,
+        candidates=candidates,
+        cfg=cfg,
+        dataset=dataset,
+        episode_ids=episode_ids,
+        timesteps=timesteps,
+    )
     for method in methods:
-        scores = _metric_scores(method, fit, states, anchors, candidates, cfg, dataset)
+        scores = build_experiment_scorer(method, cfg).score(context)
         method_rows = []
         for i in range(anchors.shape[0]):
             labels = (ground_truth[i] >= np.percentile(ground_truth[i], 75.0)).astype(np.int64)
@@ -178,10 +154,7 @@ def analyze_single_dataset(dataset_id: str, cfg: ReachabilityAnalysisConfig) -> 
 def analyze_datasets(cfg: ReachabilityAnalysisConfig) -> dict[str, Any]:
     """Run reachability alignment for all configured datasets."""
 
-    ensure_dir(cfg.output_dir)
-    ensure_dir(cfg.cache_dir or f"{cfg.output_dir}/cache")
-    ensure_dir(cfg.tables_dir)
-    ensure_dir(cfg.figures_dir)
+    artifacts = ArtifactWriter(cfg.output_dir, cfg.cache_dir).prepare()
     summary_rows: list[dict[str, Any]] = []
     per_anchor_rows: list[dict[str, Any]] = []
     scatter_paths = []
@@ -191,19 +164,18 @@ def analyze_datasets(cfg: ReachabilityAnalysisConfig) -> dict[str, Any]:
         per_anchor_rows.extend(result["per_anchor_rows"])
         if result["scatter_path"]:
             scatter_paths.append(result["scatter_path"])
-    summary_path = f"{cfg.tables_dir}/summary.csv"
-    per_anchor_path = f"{cfg.tables_dir}/per_anchor.csv"
-    save_csv(summary_path, summary_rows)
-    save_csv(per_anchor_path, per_anchor_rows)
-    bar_path = plot_relabel_bars(summary_rows, f"{cfg.figures_dir}/alignment_spearman_seed{cfg.seed}.png")
-    report_path = f"{cfg.output_dir}/report.md"
-    with open(report_path, "w", encoding="utf-8") as handle:
-        handle.write("# Reachability Alignment Report\n\n")
-        handle.write(f"- summary: `{summary_path}`\n")
-        handle.write(f"- per-anchor: `{per_anchor_path}`\n")
-        handle.write(f"- spearman figure: `{bar_path}`\n")
-        for path in scatter_paths:
-            handle.write(f"- scatter: `{path}`\n")
+    summary_path = artifacts.save_csv("summary.csv", summary_rows)
+    per_anchor_path = artifacts.save_csv("per_anchor.csv", per_anchor_rows)
+    bar_path = plot_relabel_bars(summary_rows, artifacts.figure_path(f"alignment_spearman_seed{cfg.seed}.png"))
+    report_path = artifacts.write_report(
+        "Reachability Alignment Report",
+        [
+            f"- summary: `{summary_path}`",
+            f"- per-anchor: `{per_anchor_path}`",
+            f"- spearman figure: `{bar_path}`",
+            *[f"- scatter: `{path}`" for path in scatter_paths],
+        ],
+    )
     return {
         "summary_rows": summary_rows,
         "per_anchor_rows": per_anchor_rows,
@@ -225,4 +197,3 @@ def run_final_evaluation(cfg: ReachabilityAnalysisConfig) -> dict[str, Any]:
     """Compatibility wrapper for final evaluation entry points."""
 
     return analyze_datasets(cfg)
-

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 import os
 import re
 from collections.abc import Iterable
@@ -148,4 +147,3 @@ def cosine_distance_matrix(x: np.ndarray, y: np.ndarray) -> np.ndarray:
     y_norm = np.linalg.norm(y, axis=1, keepdims=True)
     sim = (x @ y.T) / np.maximum(x_norm * y_norm.T, 1e-12)
     return 1.0 - np.clip(sim, -1.0, 1.0)
-

@@ -10,6 +10,7 @@ from .isolation_kernel import IsolationKernelDistance, SoftIsolationKernel
 from .one_step_dynamics import OneStepDynamicsDistance
 from .h_successor import HSuccessorDistance
 from .task_conditioned import TaskConditionedStateDistance
+from .registry import STATE_METRIC_REGISTRY, build_state_metric
 
 __all__ = [
     "StateMetric",
@@ -23,5 +24,6 @@ __all__ = [
     "OneStepDynamicsDistance",
     "HSuccessorDistance",
     "TaskConditionedStateDistance",
+    "STATE_METRIC_REGISTRY",
+    "build_state_metric",
 ]
-

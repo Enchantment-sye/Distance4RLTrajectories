@@ -11,16 +11,10 @@ from scipy.spatial.distance import cdist
 from reachability_metrics.data import load_dataset_or_synthetic
 from reachability_metrics.evaluation import ndcg_at_k, safe_spearman
 from reachability_metrics.evaluation.relabeling import diversity_at_k, goal_precision_at_k, mean_gt_score_at_k, unique_goal_ratio_at_k
-from reachability_metrics.evaluation.reports import save_csv
-from reachability_metrics.state_metrics import (
-    AdaptiveGaussianDistance,
-    EuclideanDistance,
-    GaussianKernelDistance,
-    IsolationKernelDistance,
-    MahalanobisDistance,
-    OneStepDynamicsDistance,
-)
-from reachability_metrics.utils import dataset_slug, ensure_dir
+from reachability_metrics.experiments.artifacts import ArtifactWriter
+from reachability_metrics.experiments.scorers import StateScoringContext, build_experiment_scorer
+from reachability_metrics.torch_utils import cpu_numpy
+from reachability_metrics.utils import dataset_slug
 from reachability_metrics.visualization.maze import plot_topk_goals_on_maze
 from reachability_metrics.visualization.plots import plot_relabel_bars
 
@@ -88,45 +82,20 @@ def _temporal_scores(episode_ids: np.ndarray, timesteps: np.ndarray, anchors: np
     return scores
 
 
-def _method_scores(method: str, fit: np.ndarray, states: np.ndarray, anchors: np.ndarray, candidates: np.ndarray, cfg: KNNRelabelConfig) -> np.ndarray:
-    x = states[anchors]
-    y = states[candidates]
-    if method == "euclidean":
-        return -EuclideanDistance().pairwise_distance(x, y)
-    if method == "gaussian":
-        return GaussianKernelDistance().fit(fit).pairwise_similarity(x, y)
-    if method == "adaptive_gaussian":
-        return AdaptiveGaussianDistance().fit(fit).pairwise_similarity(x, y)
-    if method == "mahalanobis":
-        return -MahalanobisDistance().fit(fit).pairwise_distance(x, y)
-    if method == "ik":
-        return IsolationKernelDistance(
-            cfg.ik_ensemble_size,
-            cfg.ik_subsample_size,
-            cfg.ik_temperature,
-            device=cfg.ik_device,
-            batch_size=cfg.ik_batch_size,
-            random_state=cfg.seed,
-        ).fit(fit).pairwise_similarity(x, y)
-    raise ValueError(method)
-
-
 def run_relabel_benchmark(cfg: KNNRelabelConfig, dataset_id: str | None = None) -> dict[str, Any]:
     """Run relabeling for one or more datasets."""
-    ensure_dir(cfg.output_dir)
-    ensure_dir(cfg.cache_dir or f"{cfg.output_dir}/cache")
-    ensure_dir(cfg.tables_dir)
-    ensure_dir(cfg.figures_dir)
+    artifacts = ArtifactWriter(cfg.output_dir, cfg.cache_dir).prepare()
     datasets = [dataset_id] if dataset_id is not None else cfg.datasets
     rng = np.random.default_rng(cfg.seed)
     summary_rows: list[dict[str, Any]] = []
     per_anchor_rows: list[dict[str, Any]] = []
     for ds in datasets:
         dataset = load_dataset_or_synthetic(ds, minari_datasets_path=cfg.minari_datasets_path, use_achieved_goal=True, synthetic_seed=cfg.seed)
-        states = dataset.states()
-        episode_ids = dataset.episode_ids()
-        timesteps = dataset.timesteps()
-        valid = np.flatnonzero(timesteps < dataset.episode_lengths()[episode_ids] - cfg.horizon - 1)
+        states = cpu_numpy(dataset.states())
+        episode_ids = cpu_numpy(dataset.episode_ids())
+        timesteps = cpu_numpy(dataset.timesteps())
+        episode_lengths = cpu_numpy(dataset.episode_lengths())
+        valid = np.flatnonzero(timesteps < episode_lengths[episode_ids] - cfg.horizon - 1)
         if valid.size == 0:
             valid = np.arange(states.shape[0])
         anchors = rng.choice(valid, size=min(cfg.num_anchors, valid.size), replace=False)
@@ -135,17 +104,24 @@ def run_relabel_benchmark(cfg: KNNRelabelConfig, dataset_id: str | None = None) 
         gt = _reachability_gt(states, episode_ids, timesteps, anchors, candidates, cfg.horizon)
         geo = np.linalg.norm(states[anchors][:, None, :2] - states[candidates][None, :, :2], axis=-1)
         methods = ["euclidean", "gaussian", "mahalanobis", "adaptive_gaussian", "ik", "temporal_distance", "one_step_dynamics"]
-        transition_states, transition_next = dataset.transition_pairs()
+        context = StateScoringContext(
+            fit=fit,
+            states=states,
+            anchors=anchors,
+            candidates=candidates,
+            cfg=cfg,
+            dataset=dataset,
+            episode_ids=episode_ids,
+            timesteps=timesteps,
+        )
+        plot_scores: np.ndarray | None = None
         for method in methods:
-            if method == "temporal_distance":
-                scores = _temporal_scores(episode_ids, timesteps, anchors, candidates)
-            elif method == "one_step_dynamics" and transition_states.shape[0] > 0:
-                scores = -OneStepDynamicsDistance().fit(transition_states, transition_next).pairwise_distance(states[anchors], states[candidates])
-            else:
-                scores = _method_scores(method, fit, states, anchors, candidates, cfg)
+            scores = build_experiment_scorer(method, cfg).score(context)
             if cfg.min_goal_dist > 0:
                 scores = scores.copy()
                 scores[geo < float(cfg.min_goal_dist)] = -np.inf
+            if method == "ik":
+                plot_scores = scores
             rows = []
             for i in range(anchors.shape[0]):
                 labels = (gt[i] > np.percentile(gt[i], 75.0)).astype(np.int64)
@@ -173,16 +149,22 @@ def run_relabel_benchmark(cfg: KNNRelabelConfig, dataset_id: str | None = None) 
                 "mean_gt_reachability": float(np.mean([r["mean_gt_reachability"] for r in rows])),
                 "diversity": float(np.mean([r["diversity"] for r in rows])),
             })
-        plot_topk_goals_on_maze(states[anchors[0], :2], states[candidates, :2], scores[0], f"{cfg.figures_dir}/{dataset_slug(ds)}_ik_topk_seed{cfg.seed}.png", cfg.top_k)
-    summary_path = f"{cfg.tables_dir}/summary.csv"
-    per_anchor_path = f"{cfg.tables_dir}/per_anchor.csv"
-    save_csv(summary_path, summary_rows)
-    save_csv(per_anchor_path, per_anchor_rows)
-    fig_path = plot_relabel_bars(summary_rows, f"{cfg.figures_dir}/relabel_bars_seed{cfg.seed}.png")
-    report_path = f"{cfg.output_dir}/report.md"
-    with open(report_path, "w", encoding="utf-8") as handle:
-        handle.write("# kNN Relabeling Report\n\n")
-        handle.write(f"- summary: `{summary_path}`\n")
-        handle.write(f"- figure: `{fig_path}`\n")
+        if plot_scores is not None:
+            plot_topk_goals_on_maze(
+                states[anchors[0], :2],
+                states[candidates, :2],
+                plot_scores[0],
+                artifacts.figure_path(f"{dataset_slug(ds)}_ik_topk_seed{cfg.seed}.png"),
+                cfg.top_k,
+            )
+    summary_path = artifacts.save_csv("summary.csv", summary_rows)
+    per_anchor_path = artifacts.save_csv("per_anchor.csv", per_anchor_rows)
+    fig_path = plot_relabel_bars(summary_rows, artifacts.figure_path(f"relabel_bars_seed{cfg.seed}.png"))
+    report_path = artifacts.write_report(
+        "kNN Relabeling Report",
+        [
+            f"- summary: `{summary_path}`",
+            f"- figure: `{fig_path}`",
+        ],
+    )
     return {"summary_rows": summary_rows, "per_anchor_rows": per_anchor_rows, "summary_path": summary_path, "per_anchor_path": per_anchor_path, "report_path": report_path}
-

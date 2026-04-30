@@ -5,9 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from reachability_metrics.evaluation.reports import save_csv
+from reachability_metrics.experiments.artifacts import ArtifactWriter
 from reachability_metrics.experiments.knn_relabeling import DEFAULT_DATASETS, KNNRelabelConfig, run_relabel_benchmark
-from reachability_metrics.utils import ensure_dir
 
 
 @dataclass
@@ -31,8 +30,7 @@ class SensitivityConfig:
 def run_sensitivity_experiments(cfg: SensitivityConfig) -> dict[str, Any]:
     """Run temporal-sample-starvation and window-mismatch sweeps."""
 
-    ensure_dir(cfg.output_dir)
-    ensure_dir(cfg.tables_dir)
+    artifacts = ArtifactWriter(cfg.output_dir).prepare(figures=False, cache=False)
     rows: list[dict[str, Any]] = []
     for count in cfg.candidate_counts:
         relabel_cfg = KNNRelabelConfig(
@@ -64,11 +62,6 @@ def run_sensitivity_experiments(cfg: SensitivityConfig) -> dict[str, Any]:
         for row in result["summary_rows"]:
             if row["method"] == "temporal_distance":
                 rows.append({"experiment": "window_mismatch", "horizon": horizon, **row})
-    table_path = f"{cfg.tables_dir}/sensitivity_summary.csv"
-    save_csv(table_path, rows)
-    report_path = f"{cfg.output_dir}/report.md"
-    with open(report_path, "w", encoding="utf-8") as handle:
-        handle.write("# Sensitivity Report\n\n")
-        handle.write(f"- summary: `{table_path}`\n")
+    table_path = artifacts.save_csv("sensitivity_summary.csv", rows)
+    report_path = artifacts.write_report("Sensitivity Report", [f"- summary: `{table_path}`"])
     return {"summary_rows": rows, "summary_path": table_path, "report_path": report_path}
-

@@ -4,19 +4,31 @@ from __future__ import annotations
 
 from typing import Any
 
-import numpy as np
-
-from reachability_metrics.utils import pairwise_sqeuclidean
+from reachability_metrics.torch_utils import pairwise_euclidean
 from .base import StateMetric
 
 
 class EuclideanDistance(StateMetric):
-    """Plain Euclidean distance."""
+    """Plain Euclidean distance implemented with torch."""
 
-    def pairwise_distance(self, X: Any, Y: Any | None = None) -> np.ndarray:
+    def __init__(
+        self,
+        device: str = "auto",
+        dtype: str = "float32",
+        batch_size: int = 4096,
+        block_size: int = 4096,
+        return_numpy: bool = False,
+        output_format: str | None = None,
+    ) -> None:
+        super().__init__(
+            device=device,
+            dtype=dtype,
+            batch_size=batch_size,
+            block_size=block_size,
+            return_numpy=return_numpy,
+            output_format=output_format,
+        )
+
+    def pairwise_distance_tensor(self, X: Any, Y: Any | None = None):
         x, y = self._check_pair_inputs(X, Y)
-        return np.sqrt(pairwise_sqeuclidean(x, y)).astype(np.float32)
-
-    def pairwise_similarity(self, X: Any, Y: Any | None = None) -> np.ndarray:
-        return (-self.pairwise_distance(X, Y)).astype(np.float32)
-
+        return pairwise_euclidean(x, y)

@@ -12,8 +12,7 @@ def test_gdk2_set_distance_and_novelty() -> None:
     metric = GDK2SetDistance().fit([reference])
     d_ref = metric.novelty_score(reference[0])[0]
     d_noise = metric.novelty_score(shifted[0])[0]
-    assert d_ref < d_noise
+    assert bool(d_ref < d_noise)
 
     scorer = TrajectoryNoveltyScorer(method="gdk2").fit(reference)
-    assert scorer.score(reference[1])[0] < scorer.score(shifted[1])[0]
-
+    assert bool(scorer.score(reference[1])[0] < scorer.score(shifted[1])[0])

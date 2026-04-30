@@ -41,7 +41,6 @@ pip install -e ".[optimal_transport]"  # POT 最优传输支持
 pip install -e ".[t2vec]"              # t2vec 训练依赖
 ```
 
-核心 numpy/scipy/sklearn 距离不依赖 D4RL、Minari、POT 或 torch。
 
 ## 快速开始
 

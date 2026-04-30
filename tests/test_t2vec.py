@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+import torch
 
 from reachability_metrics.trajectory_metrics import T2VecDistance
 
@@ -34,9 +35,8 @@ def test_t2vec_training_save_load_and_similarity(tmp_path) -> None:
 
     loaded = T2VecDistance(model_path=str(path), device="cpu").load(str(path))
     emb_loaded = loaded.transform(train[:3])
-    assert np.allclose(emb, emb_loaded, atol=1e-5)
+    torch.testing.assert_close(emb, emb_loaded, atol=1e-5, rtol=1e-5)
 
     d_train = metric.pairwise_distance([train[0]], [train[1]])[0, 0]
     d_noise = metric.pairwise_distance([train[0]], [noise])[0, 0]
-    assert d_train < d_noise
-
+    assert bool(d_train < d_noise)

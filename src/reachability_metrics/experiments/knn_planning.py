@@ -6,13 +6,13 @@ from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
-from scipy.spatial import cKDTree
 
 from reachability_metrics.data import load_dataset_or_synthetic
 from reachability_metrics.evaluation.planning import multi_source_dijkstra
-from reachability_metrics.evaluation.reports import save_csv
-from reachability_metrics.state_metrics import EuclideanDistance, GaussianKernelDistance, IsolationKernelDistance
-from reachability_metrics.utils import dataset_slug, ensure_dir
+from reachability_metrics.experiments.artifacts import ArtifactWriter
+from reachability_metrics.state_metrics import build_state_metric
+from reachability_metrics.torch_utils import cpu_numpy
+from reachability_metrics.utils import dataset_slug
 from reachability_metrics.visualization.maze import plot_query_paths
 from reachability_metrics.visualization.plots import plot_planning_suboptimality, plot_planning_success_rate
 
@@ -53,7 +53,7 @@ class KNNPlanningEvalConfig:
 
 
 def _topk_scores(metric: Any, states: np.ndarray, k: int) -> np.ndarray:
-    scores = metric.pairwise_similarity(states, states)
+    scores = cpu_numpy(metric.pairwise_similarity(states, states))
     np.fill_diagonal(scores, -np.inf)
     idx = np.argpartition(-scores, kth=min(k, scores.shape[1] - 1) - 1, axis=1)[:, :k]
     vals = np.take_along_axis(scores, idx, axis=1)
@@ -62,17 +62,14 @@ def _topk_scores(metric: Any, states: np.ndarray, k: int) -> np.ndarray:
 
 
 def run_knn_planning_eval(cfg: KNNPlanningEvalConfig) -> dict[str, Any]:
-    ensure_dir(cfg.output_dir)
-    ensure_dir(cfg.cache_dir or f"{cfg.output_dir}/cache")
-    ensure_dir(cfg.tables_dir)
-    ensure_dir(cfg.figures_dir)
+    artifacts = ArtifactWriter(cfg.output_dir, cfg.cache_dir).prepare()
     rng = np.random.default_rng(cfg.seed)
     rows: list[dict[str, Any]] = []
     query_rows: list[dict[str, Any]] = []
     methods = ["euclidean", "gaussian", "ik"]
     for ds in cfg.datasets:
         dataset = load_dataset_or_synthetic(ds, minari_datasets_path=cfg.minari_datasets_path, use_achieved_goal=True, synthetic_seed=cfg.seed)
-        states_all = dataset.states()
+        states_all = cpu_numpy(dataset.states())
         stride = max(states_all.shape[0] // 600, 1)
         node_xy = states_all[::stride, :2]
         n = node_xy.shape[0]
@@ -83,9 +80,16 @@ def run_knn_planning_eval(cfg: KNNPlanningEvalConfig) -> dict[str, Any]:
             temporal_costs[i].append(float(np.linalg.norm(node_xy[i + 1] - node_xy[i])))
         fit = node_xy
         metric_map = {
-            "euclidean": EuclideanDistance().fit(fit),
-            "gaussian": GaussianKernelDistance().fit(fit),
-            "ik": IsolationKernelDistance(cfg.ik_ensemble_size, cfg.ik_subsample_size, cfg.ik_temperature, device=cfg.ik_device, random_state=cfg.seed).fit(fit),
+            "euclidean": build_state_metric("euclidean").fit(fit),
+            "gaussian": build_state_metric("gaussian").fit(fit),
+            "ik": build_state_metric(
+                "ik",
+                ensemble_size=cfg.ik_ensemble_size,
+                subsample_size=cfg.ik_subsample_size,
+                temperature=cfg.ik_temperature,
+                device=cfg.ik_device,
+                random_state=cfg.seed,
+            ).fit(fit),
         }
         queries = rng.integers(0, n, size=(min(cfg.num_queries, max(n // 2, 1)), 2))
         queries = queries[queries[:, 0] != queries[:, 1]]
@@ -133,16 +137,16 @@ def run_knn_planning_eval(cfg: KNNPlanningEvalConfig) -> dict[str, Any]:
                 "precision": float(valid_edges / max(total_edges, 1)),
             })
         if paths:
-            plot_query_paths(node_xy, paths[:3], f"{cfg.figures_dir}/{dataset_slug(ds)}_query_paths_seed{cfg.seed}.png")
-    per_dataset_path = f"{cfg.tables_dir}/per_dataset_metrics.csv"
-    per_query_path = f"{cfg.tables_dir}/per_query_metrics.csv"
-    save_csv(per_dataset_path, rows)
-    save_csv(per_query_path, query_rows)
-    fig1 = plot_planning_success_rate(rows, f"{cfg.figures_dir}/planning_success_seed{cfg.seed}.png")
-    fig2 = plot_planning_suboptimality(rows, f"{cfg.figures_dir}/planning_suboptimality_seed{cfg.seed}.png")
-    report_path = f"{cfg.output_dir}/report.md"
-    with open(report_path, "w", encoding="utf-8") as handle:
-        handle.write("# kNN Planning Report\n\n")
-        handle.write(f"- per dataset: `{per_dataset_path}`\n- figures: `{fig1}`, `{fig2}`\n")
+            plot_query_paths(node_xy, paths[:3], artifacts.figure_path(f"{dataset_slug(ds)}_query_paths_seed{cfg.seed}.png"))
+    per_dataset_path = artifacts.save_csv("per_dataset_metrics.csv", rows)
+    per_query_path = artifacts.save_csv("per_query_metrics.csv", query_rows)
+    fig1 = plot_planning_success_rate(rows, artifacts.figure_path(f"planning_success_seed{cfg.seed}.png"))
+    fig2 = plot_planning_suboptimality(rows, artifacts.figure_path(f"planning_suboptimality_seed{cfg.seed}.png"))
+    report_path = artifacts.write_report(
+        "kNN Planning Report",
+        [
+            f"- per dataset: `{per_dataset_path}`",
+            f"- figures: `{fig1}`, `{fig2}`",
+        ],
+    )
     return {"per_dataset_table": per_dataset_path, "per_query_table": per_query_path, "report_path": report_path, "summary_rows": rows}
-

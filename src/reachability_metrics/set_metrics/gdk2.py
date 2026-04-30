@@ -10,5 +10,7 @@ class GDK2SetDistance(TrajectorySetDistance):
     """Two-level set distance using GDK trajectory embeddings."""
 
     def __init__(self, **kwargs):
-        super().__init__(trajectory_metric=GDKTrajectoryDistance(**kwargs))
-
+        set_kwargs = {k: kwargs.pop(k) for k in list(kwargs) if k in {"normalize", "return_numpy", "output_format"}}
+        if "set_distance_mode" in kwargs:
+            set_kwargs["distance_mode"] = kwargs.pop("set_distance_mode")
+        super().__init__(trajectory_metric=GDKTrajectoryDistance(**kwargs), **set_kwargs)

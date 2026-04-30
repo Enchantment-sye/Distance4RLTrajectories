@@ -10,15 +10,10 @@ import numpy as np
 from reachability_metrics.data import TrajectoryDataset, load_dataset_or_synthetic
 from reachability_metrics.data.windows import future_windows
 from reachability_metrics.evaluation import auc_from_binary_labels, average_precision_from_binary_labels, recall_at_k
-from reachability_metrics.evaluation.reports import save_csv
-from reachability_metrics.state_metrics import AdaptiveGaussianDistance, IsolationKernelDistance
-from reachability_metrics.trajectory_metrics import (
-    AdaptiveGDKTrajectoryDistance,
-    GDKTrajectoryDistance,
-    IDKTrajectoryDistance,
-    TrajectoryWassersteinDistance,
-)
-from reachability_metrics.utils import dataset_slug, ensure_dir
+from reachability_metrics.experiments.artifacts import ArtifactWriter
+from reachability_metrics.trajectory_metrics import build_trajectory_metric
+from reachability_metrics.torch_utils import cpu_numpy
+from reachability_metrics.utils import dataset_slug
 from reachability_metrics.visualization.plots import plot_successor_auroc
 
 
@@ -70,6 +65,7 @@ class SuccessorDistanceConfig:
 
 
 def _grid_labels(endpoints: np.ndarray, nx: int, ny: int) -> np.ndarray:
+    endpoints = cpu_numpy(endpoints)
     mins = endpoints.min(axis=0)
     maxs = endpoints.max(axis=0)
     span = np.maximum(maxs - mins, 1e-6)
@@ -98,13 +94,14 @@ def _fit_method(method: str, windows: np.ndarray, cfg: SuccessorDistanceConfig) 
     sample_idx = rng.choice(windows.shape[0], size=sample_count, replace=False)
     sample = [x for x in windows[sample_idx]]
     if method == "gdk":
-        return GDKTrajectoryDistance().fit(sample)
+        return build_trajectory_metric("gdk", feature_approximation="nystrom", num_landmarks=128).fit(sample)
     if method == "adaptive_gdk":
-        return AdaptiveGDKTrajectoryDistance(k=cfg.adaptive_gaussian_k, eps=cfg.adaptive_gaussian_eps).fit(sample)
+        return build_trajectory_metric("adaptive_gdk", k=cfg.adaptive_gaussian_k, eps=cfg.adaptive_gaussian_eps).fit(sample)
     if method == "wasserstein_w2":
-        return TrajectoryWassersteinDistance().fit(sample)
+        return build_trajectory_metric("wasserstein_w2").fit(sample)
     if method == "idk":
-        return IDKTrajectoryDistance(
+        return build_trajectory_metric(
+            "idk",
             ensemble_size=int(cfg.ik_ensemble_sizes[0]),
             subsample_size=int(cfg.ik_subsample_sizes[0]),
             temperature=float(cfg.ik_temperatures[0]),
@@ -120,13 +117,13 @@ def _metric_distance(method: str, metric: Any, a: np.ndarray, b: np.ndarray, cfg
     traj_b = [x for x in b]
     if method == "raw":
         return _raw_window_distance(a, b, gamma=cfg.raw_gamma)
-    if method == "idk" and hasattr(metric, "transform"):
-        emb_a = metric.transform(traj_a)
-        emb_b = metric.transform(traj_b)
+    if hasattr(metric, "transform") and method in {"idk", "gdk", "adaptive_gdk"}:
+        emb_a = cpu_numpy(metric.transform(traj_a))
+        emb_b = cpu_numpy(metric.transform(traj_b))
         return np.linalg.norm(emb_a - emb_b, axis=1).astype(np.float32)
     out = np.empty(len(traj_a), dtype=np.float32)
     for i, (ta, tb) in enumerate(zip(traj_a, traj_b)):
-        out[i] = float(metric.pairwise_distance([ta], [tb])[0, 0])
+        out[i] = float(cpu_numpy(metric.pairwise_distance([ta], [tb]))[0, 0])
     return out
 
 
@@ -136,24 +133,23 @@ def _load_dataset(dataset_id: str, cfg: SuccessorDistanceConfig) -> TrajectoryDa
         minari_datasets_path=cfg.minari_datasets_path,
         use_achieved_goal=True,
         synthetic_seed=cfg.seed,
+        synthetic_num_trajectories=min(12, max(4, cfg.num_queries * 2)),
+        synthetic_length=max(max(cfg.horizon_values) + 6, 16),
     )
 
 
 def run_successor_distance(cfg: SuccessorDistanceConfig) -> dict[str, Any]:
     """Run successor-distance evaluation and write csv/figures/report."""
-    ensure_dir(cfg.output_dir)
-    ensure_dir(cfg.cache_dir or f"{cfg.output_dir}/cache")
-    ensure_dir(cfg.tables_dir)
-    ensure_dir(cfg.figures_dir)
+    artifacts = ArtifactWriter(cfg.output_dir, cfg.cache_dir).prepare()
     rng = np.random.default_rng(cfg.seed)
     summary_rows: list[dict[str, Any]] = []
     recall_rows: list[dict[str, Any]] = []
     methods = ["raw", "idk", "gdk", "wasserstein_w2", "adaptive_gdk"]
     for dataset_id in cfg.datasets:
         dataset = _load_dataset(dataset_id, cfg)
-        states = dataset.states()
         for horizon in cfg.horizon_values:
             windows, _, _ = future_windows(dataset, horizon)
+            windows = cpu_numpy(windows)
             if windows.shape[0] < 2:
                 continue
             labels_region = _grid_labels(windows[:, -1, :2], cfg.grid_nx, cfg.grid_ny)
@@ -197,20 +193,19 @@ def run_successor_distance(cfg: SuccessorDistanceConfig) -> dict[str, Any]:
             "auroc": float(np.mean([r["auroc"] for r in group])),
             "auprc": float(np.mean([r["auprc"] for r in group])),
         })
-    per_dataset_path = f"{cfg.tables_dir}/per_dataset_metrics.csv"
-    overall_path = f"{cfg.tables_dir}/overall_summary.csv"
-    recall_path = f"{cfg.tables_dir}/recall_rows.csv"
-    save_csv(per_dataset_path, summary_rows)
-    save_csv(overall_path, overall_rows)
-    save_csv(recall_path, recall_rows)
-    fig_path = plot_successor_auroc(summary_rows, f"{cfg.figures_dir}/successor_auroc_seed{cfg.seed}.png")
-    report_path = f"{cfg.output_dir}/report.md"
-    with open(report_path, "w", encoding="utf-8") as handle:
-        handle.write("# Successor Distance Report\n\n")
-        handle.write(f"- datasets: {', '.join(cfg.datasets)}\n")
-        handle.write(f"- horizons: {cfg.horizon_values}\n")
-        handle.write(f"- summary table: `{per_dataset_path}`\n")
-        handle.write(f"- figure: `{fig_path}`\n")
+    per_dataset_path = artifacts.save_csv("per_dataset_metrics.csv", summary_rows)
+    overall_path = artifacts.save_csv("overall_summary.csv", overall_rows)
+    recall_path = artifacts.save_csv("recall_rows.csv", recall_rows)
+    fig_path = plot_successor_auroc(summary_rows, artifacts.figure_path(f"successor_auroc_seed{cfg.seed}.png"))
+    report_path = artifacts.write_report(
+        "Successor Distance Report",
+        [
+            f"- datasets: {', '.join(cfg.datasets)}",
+            f"- horizons: {cfg.horizon_values}",
+            f"- summary table: `{per_dataset_path}`",
+            f"- figure: `{fig_path}`",
+        ],
+    )
     return {
         "summary_rows": summary_rows,
         "overall_rows": overall_rows,

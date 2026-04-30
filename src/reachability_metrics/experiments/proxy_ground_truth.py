@@ -8,6 +8,7 @@ import numpy as np
 from scipy.spatial.distance import cdist
 
 from reachability_metrics.data import TrajectoryDataset
+from reachability_metrics.torch_utils import cpu_numpy
 
 
 @dataclass
@@ -35,9 +36,9 @@ def empirical_h_reachability_scores(
     the original analysis code while staying independent of environment wrappers.
     """
 
-    states = dataset.states()
-    episode_ids = dataset.episode_ids()
-    timesteps = dataset.timesteps()
+    states = cpu_numpy(dataset.states())
+    episode_ids = cpu_numpy(dataset.episode_ids())
+    timesteps = cpu_numpy(dataset.timesteps())
     anchors = np.asarray(anchors, dtype=np.int64)
     candidates = np.asarray(candidates, dtype=np.int64)
     candidate_states = states[candidates]
@@ -68,9 +69,9 @@ def first_hit_temporal_distances(
 ) -> np.ndarray:
     """Approximate first-hit temporal distance from each anchor to candidates."""
 
-    states = dataset.states()
-    episode_ids = dataset.episode_ids()
-    timesteps = dataset.timesteps()
+    states = cpu_numpy(dataset.states())
+    episode_ids = cpu_numpy(dataset.episode_ids())
+    timesteps = cpu_numpy(dataset.timesteps())
     anchors = np.asarray(anchors, dtype=np.int64)
     candidates = np.asarray(candidates, dtype=np.int64)
     candidate_states = states[candidates]
@@ -103,4 +104,3 @@ def geodesic_proxy_distances(states_a: np.ndarray, states_b: np.ndarray) -> np.n
     if b.ndim == 1:
         b = b.reshape(1, -1)
     return cdist(a[:, :2], b[:, :2]).astype(np.float32)
-
