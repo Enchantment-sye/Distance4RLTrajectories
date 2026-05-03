@@ -35,6 +35,11 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+markers = [
+  "distributed: tests requiring torch.distributed CPU process groups",
+  "slow: larger distributed or expensive metric tests",
+  "cli: subprocess or torchrun CLI tests",
+]
 
 [tool.ruff]
 line-length = 100
