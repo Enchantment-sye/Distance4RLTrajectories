@@ -4,13 +4,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from reachability_metrics.aggregation import build_aggregation
+from reachability_metrics.aggregation import aggregate_groupwise_distances, build_aggregation
 from reachability_metrics.base import PairwiseTensorMetricMixin
 from reachability_metrics.state_metrics import StateMetric
 from reachability_metrics.trajectory_metrics.kme import KernelMeanEmbedding
 from reachability_metrics.torch_utils import (
     as_2d_tensor,
-    as_tensor,
     as_trajectory_tensor_list,
     require_torch,
 )
@@ -42,17 +41,17 @@ class StateToTrajectoryDistance(PairwiseTensorMetricMixin):
         self.state_metric.fit(torch.cat(trajs, dim=0))
         return self
 
-    def _aggregate(self, distances: Any):
-        return self.aggregation_strategy_.reduce(distances, dim=1)
-
     def pairwise_distance_tensor(self, states: Any, trajectories: Any | None = None):
-        torch = require_torch()
         x = as_2d_tensor(states, dtype=getattr(self.state_metric, "dtype", "float32"), device=getattr(self.state_metric, "device", "auto"), name="states")
         trajs = self.trajectories_ if trajectories is None else as_trajectory_tensor_list(trajectories, dtype=x.dtype, device=x.device)
-        out = torch.zeros((x.shape[0], len(trajs)), dtype=x.dtype, device=x.device)
-        for j, traj in enumerate(trajs):
-            out[:, j] = self._aggregate(as_tensor(self.state_metric.pairwise_distance(x, traj), dtype=x.dtype, device=x.device))
-        return out
+        return aggregate_groupwise_distances(
+            self.state_metric,
+            x,
+            trajs,
+            self.aggregation_strategy_,
+            dtype=x.dtype,
+            device=x.device,
+        )
 
 
 class StateToTrajectoryKMEDistance(PairwiseTensorMetricMixin):
@@ -81,9 +80,6 @@ class StateToTrajectoryKMEDistance(PairwiseTensorMetricMixin):
         emb = self.traj_embeddings_ if trajectories is None else self.kme_.transform_tensor(trajectories)
         return fx @ emb.T
 
-    def pairwise_similarity(self, states: Any, trajectories: Any | None = None):
-        return self._return(self.pairwise_similarity_tensor(states, trajectories))
-
     def pairwise_distance_tensor(self, states: Any, trajectories: Any | None = None):
         torch = require_torch()
         x = as_2d_tensor(states, dtype=self.kme_._dtype(), device=self.kme_._device(), name="states")
@@ -93,6 +89,3 @@ class StateToTrajectoryKMEDistance(PairwiseTensorMetricMixin):
         sx = torch.sum(fx * fx, dim=1)
         sim = fx @ emb.T
         return torch.sqrt(torch.clamp(sx[:, None] + traj_self[None, :] - 2.0 * sim, min=0.0))
-
-    def pairwise_distance(self, states: Any, trajectories: Any | None = None):
-        return self._return(self.pairwise_distance_tensor(states, trajectories))

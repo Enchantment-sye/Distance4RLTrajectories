@@ -14,6 +14,17 @@ from reachability_metrics.torch_utils import (
 )
 
 
+def transform_embedding_pair(
+    transform: Any,
+    trajectories_a: Any,
+    trajectories_b: Any | None = None,
+) -> tuple[Any, Any]:
+    """Transform one or two trajectory collections into a reusable embedding pair."""
+    a = transform(trajectories_a)
+    b = a if trajectories_b is None else transform(trajectories_b)
+    return a, b
+
+
 class FeatureMapStrategy:
     """State feature map used before reducing states into trajectory embeddings."""
 
@@ -46,7 +57,9 @@ class NystromFeatureMap(FeatureMapStrategy):
             else:
                 gen = torch.Generator(device=states.device)
                 gen.manual_seed(int(self.random_state))
-                idx = torch.randperm(n, generator=gen, device=states.device)[: int(self.num_landmarks)]
+                idx = torch.randperm(n, generator=gen, device=states.device)[
+                    : int(self.num_landmarks)
+                ]
             landmarks = states[idx].clone()
         else:
             landmarks = states.clone()
@@ -142,7 +155,11 @@ def build_feature_map_strategy(
     states: Any,
 ) -> FeatureMapStrategy:
     """Choose the appropriate feature-map strategy for a fitted base kernel."""
-    values = as_2d_tensor(states, dtype=getattr(states, "dtype", "float32"), device=getattr(states, "device", "auto"))
+    values = as_2d_tensor(
+        states,
+        dtype=getattr(states, "dtype", "float32"),
+        device=getattr(states, "device", "auto"),
+    )
     if isinstance(base_kernel, GaussianKernelDistance):
         return NystromFeatureMap(
             feature_approximation=feature_approximation,
@@ -157,4 +174,3 @@ def build_feature_map_strategy(
     if hasattr(base_kernel, "transform_tensor"):
         return TransformFeatureMap().fit(base_kernel, values)
     return PairwiseKernelFeatureMap().fit(base_kernel, values)
-

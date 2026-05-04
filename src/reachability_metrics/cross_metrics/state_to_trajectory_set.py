@@ -4,9 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from reachability_metrics.aggregation import build_aggregation
+from reachability_metrics.aggregation import aggregate_groupwise_distances, build_aggregation
 from reachability_metrics.base import PairwiseTensorMetricMixin
-from reachability_metrics.torch_utils import as_tensor, require_torch
 
 
 class StateToTrajectorySetDistance(PairwiseTensorMetricMixin):
@@ -35,10 +34,10 @@ class StateToTrajectorySetDistance(PairwiseTensorMetricMixin):
         return self
 
     def pairwise_distance_tensor(self, states: Any, trajectory_sets: list[list[Any]] | None = None):
-        torch = require_torch()
         sets = self.trajectory_sets_ if trajectory_sets is None else trajectory_sets
-        rows = []
-        for group in sets:
-            d = as_tensor(self.state_to_trajectory_metric.pairwise_distance(states, group))
-            rows.append(self.aggregation_strategy_.reduce(d, dim=1))
-        return torch.stack(rows, dim=1)
+        return aggregate_groupwise_distances(
+            self.state_to_trajectory_metric,
+            states,
+            sets,
+            self.aggregation_strategy_,
+        )

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 
+from reachability_metrics.cli._helpers import config_from_args, experiment_parser
 from reachability_metrics.experiments.paper_reproduction import (
     PaperReproductionConfig,
     run_paper_reproduction,
@@ -11,7 +12,7 @@ from reachability_metrics.experiments.paper_reproduction import (
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = experiment_parser(__doc__)
     parser.add_argument("--legacy_outputs_dir", default="/share/shangyy/codes/metra/outputs")
     parser.add_argument("--output_dir", default="outputs/paper_reproduction")
     parser.add_argument("--include_figures", action="store_true")
@@ -28,12 +29,14 @@ def main() -> None:
         include_figures = False
     if args.include_figures:
         include_figures = True
-    cfg = PaperReproductionConfig(
-        legacy_outputs_dir=args.legacy_outputs_dir,
-        output_dir=args.output_dir,
-        include_figures=include_figures,
-        verify_paper_values=bool(args.verify_paper_values),
-        strict=bool(args.strict),
+    cfg = config_from_args(
+        PaperReproductionConfig,
+        args,
+        overrides={
+            "include_figures": include_figures,
+            "verify_paper_values": bool(args.verify_paper_values),
+            "strict": bool(args.strict),
+        },
     )
     result = run_paper_reproduction(cfg)
     print(result["report_path"])
@@ -45,4 +48,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

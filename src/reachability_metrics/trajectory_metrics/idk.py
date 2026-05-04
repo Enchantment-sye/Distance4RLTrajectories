@@ -6,10 +6,10 @@ from typing import Any
 
 from reachability_metrics.state_metrics import IsolationKernelDistance
 from .base import TrajectoryMetric
-from .kme import KernelMeanEmbedding
+from .kme import KMETrajectoryDelegateMixin
 
 
-class IDKTrajectoryDistance(TrajectoryMetric):
+class IDKTrajectoryDistance(KMETrajectoryDelegateMixin, TrajectoryMetric):
     """Trajectory distance from IK kernel mean embeddings."""
 
     def __init__(
@@ -53,25 +53,10 @@ class IDKTrajectoryDistance(TrajectoryMetric):
             block_size=self.block_size,
             random_state=self.random_state,
         )
-        self.kme_ = KernelMeanEmbedding(
+        self._fit_kme(
             base,
+            self.trajectories_,
             normalize=False,
             distance_mode=self.distance_mode,
-            device=self.device,
-            dtype=self.dtype,
-            return_numpy=self.return_numpy,
-            output_format=self.output_format,
-        ).fit(self.trajectories_)
+        )
         return self
-
-    def transform_tensor(self, trajectories: Any):
-        return self.kme_.transform_tensor(trajectories)
-
-    def transform(self, trajectories: Any):
-        return self._return(self.transform_tensor(trajectories))
-
-    def pairwise_similarity_tensor(self, A: Any, B: Any | None = None):
-        return self.kme_.pairwise_similarity_tensor(A, B)
-
-    def pairwise_distance_tensor(self, A: Any, B: Any | None = None):
-        return self.kme_.pairwise_distance_tensor(A, B)

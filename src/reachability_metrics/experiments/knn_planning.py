@@ -9,12 +9,16 @@ import numpy as np
 
 from reachability_metrics.data import load_dataset_or_synthetic
 from reachability_metrics.evaluation.planning import multi_source_dijkstra
+from reachability_metrics.experiments._sampling import sample_planning_queries
 from reachability_metrics.experiments.artifacts import ArtifactWriter
 from reachability_metrics.state_metrics import build_state_metric
 from reachability_metrics.torch_utils import cpu_numpy
 from reachability_metrics.utils import dataset_slug
 from reachability_metrics.visualization.maze import plot_query_paths
-from reachability_metrics.visualization.plots import plot_planning_suboptimality, plot_planning_success_rate
+from reachability_metrics.visualization.plots import (
+    plot_planning_suboptimality,
+    plot_planning_success_rate,
+)
 
 
 DEFAULT_DATASETS = [
@@ -68,7 +72,12 @@ def run_knn_planning_eval(cfg: KNNPlanningEvalConfig) -> dict[str, Any]:
     query_rows: list[dict[str, Any]] = []
     methods = ["euclidean", "gaussian", "ik"]
     for ds in cfg.datasets:
-        dataset = load_dataset_or_synthetic(ds, minari_datasets_path=cfg.minari_datasets_path, use_achieved_goal=True, synthetic_seed=cfg.seed)
+        dataset = load_dataset_or_synthetic(
+            ds,
+            minari_datasets_path=cfg.minari_datasets_path,
+            use_achieved_goal=True,
+            synthetic_seed=cfg.seed,
+        )
         states_all = cpu_numpy(dataset.states())
         stride = max(states_all.shape[0] // 600, 1)
         node_xy = states_all[::stride, :2]
@@ -91,15 +100,18 @@ def run_knn_planning_eval(cfg: KNNPlanningEvalConfig) -> dict[str, Any]:
                 random_state=cfg.seed,
             ).fit(fit),
         }
-        queries = rng.integers(0, n, size=(min(cfg.num_queries, max(n // 2, 1)), 2))
-        queries = queries[queries[:, 0] != queries[:, 1]]
-        if queries.size == 0:
-            queries = np.asarray([[0, n - 1]], dtype=np.int64)
+        queries = sample_planning_queries(rng, n, cfg.num_queries)
         for method in methods:
-            topk = _topk_scores(metric_map[method], node_xy, min(cfg.retrieval_top_k, max(n - 1, 1)))
+            topk = _topk_scores(
+                metric_map[method],
+                node_xy,
+                min(cfg.retrieval_top_k, max(n - 1, 1)),
+            )
             targets = [list(t) for t in temporal_targets]
             costs = [list(c) for c in temporal_costs]
-            bridge_budget = cfg.antmaze_h_bridge if "antmaze" in ds.lower() else cfg.pointmaze_h_bridge
+            bridge_budget = (
+                cfg.antmaze_h_bridge if "antmaze" in ds.lower() else cfg.pointmaze_h_bridge
+            )
             valid_edges = 0
             total_edges = 0
             for i in range(n):
@@ -122,12 +134,23 @@ def run_knn_planning_eval(cfg: KNNPlanningEvalConfig) -> dict[str, Any]:
                 target_mask[int(g)] = True
                 result = multi_source_dijkstra(graph, n, np.asarray([int(s)]), target_mask)
                 geo = float(np.linalg.norm(node_xy[int(s)] - node_xy[int(g)]))
-                success = bool(result["found"]) and result["path_cost"] <= cfg.alpha * max(geo, 1e-6)
+                success = bool(result["found"]) and result["path_cost"] <= cfg.alpha * max(
+                    geo,
+                    1e-6,
+                )
                 successes.append(float(success))
                 if result["found"]:
                     subopts.append(float(result["path_cost"] / max(geo, 1e-6)))
                     paths.append(result["path_nodes"])
-                query_rows.append({"dataset": ds, "method": method, "query_id": int(qid), "success": int(success), "path_found": int(result["found"])})
+                query_rows.append(
+                    {
+                        "dataset": ds,
+                        "method": method,
+                        "query_id": int(qid),
+                        "success": int(success),
+                        "path_found": int(result["found"]),
+                    }
+                )
             rows.append({
                 "dataset": ds,
                 "dataset_slug": dataset_slug(ds),
@@ -137,11 +160,21 @@ def run_knn_planning_eval(cfg: KNNPlanningEvalConfig) -> dict[str, Any]:
                 "precision": float(valid_edges / max(total_edges, 1)),
             })
         if paths:
-            plot_query_paths(node_xy, paths[:3], artifacts.figure_path(f"{dataset_slug(ds)}_query_paths_seed{cfg.seed}.png"))
+            plot_query_paths(
+                node_xy,
+                paths[:3],
+                artifacts.figure_path(f"{dataset_slug(ds)}_query_paths_seed{cfg.seed}.png"),
+            )
     per_dataset_path = artifacts.save_csv("per_dataset_metrics.csv", rows)
     per_query_path = artifacts.save_csv("per_query_metrics.csv", query_rows)
-    fig1 = plot_planning_success_rate(rows, artifacts.figure_path(f"planning_success_seed{cfg.seed}.png"))
-    fig2 = plot_planning_suboptimality(rows, artifacts.figure_path(f"planning_suboptimality_seed{cfg.seed}.png"))
+    fig1 = plot_planning_success_rate(
+        rows,
+        artifacts.figure_path(f"planning_success_seed{cfg.seed}.png"),
+    )
+    fig2 = plot_planning_suboptimality(
+        rows,
+        artifacts.figure_path(f"planning_suboptimality_seed{cfg.seed}.png"),
+    )
     report_path = artifacts.write_report(
         "kNN Planning Report",
         [
@@ -149,4 +182,9 @@ def run_knn_planning_eval(cfg: KNNPlanningEvalConfig) -> dict[str, Any]:
             f"- figures: `{fig1}`, `{fig2}`",
         ],
     )
-    return {"per_dataset_table": per_dataset_path, "per_query_table": per_query_path, "report_path": report_path, "summary_rows": rows}
+    return {
+        "per_dataset_table": per_dataset_path,
+        "per_query_table": per_query_path,
+        "report_path": report_path,
+        "summary_rows": rows,
+    }

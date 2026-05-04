@@ -4,12 +4,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from reachability_metrics.base import TensorOutputMixin
+from reachability_metrics.base import PairwiseTensorMetricMixin, TransformTensorMixin
 from reachability_metrics.state_metrics import StateMetric
 from reachability_metrics.trajectory_metrics.kme_strategies import (
     EmbeddingDistanceStrategy,
     MeanEmbeddingReducer,
     build_feature_map_strategy,
+    transform_embedding_pair,
 )
 from reachability_metrics.torch_utils import (
     as_2d_tensor,
@@ -21,7 +22,7 @@ from reachability_metrics.torch_utils import (
 )
 
 
-class KernelMeanEmbedding(TensorOutputMixin):
+class KernelMeanEmbedding(TransformTensorMixin, PairwiseTensorMetricMixin):
     """Represent a trajectory by the mean feature map of its states."""
 
     def __init__(
@@ -63,7 +64,10 @@ class KernelMeanEmbedding(TensorOutputMixin):
         try:
             states = as_2d_tensor(X, dtype=self._dtype(), device=self._device(), name="states")
         except Exception:
-            states = torch.cat(as_trajectory_tensor_list(X, dtype=self._dtype(), device=self._device()), dim=0)
+            states = torch.cat(
+                as_trajectory_tensor_list(X, dtype=self._dtype(), device=self._device()),
+                dim=0,
+            )
         self.base_kernel.fit(states)
         self.X_fit_ = states
         self.feature_map_ = build_feature_map_strategy(
@@ -113,13 +117,9 @@ class KernelMeanEmbedding(TensorOutputMixin):
         emb = self.reducer_.transform(features, lengths)
         return self._normalize_embeddings(emb)
 
-    def transform(self, trajectories: Any):
-        return self._return(self.transform_tensor(trajectories))
-
     def pairwise_kernel_tensor(self, trajectories_a: Any, trajectories_b: Any | None = None):
         """Pairwise trajectory kernel from mean embeddings."""
-        a = self.transform_tensor(trajectories_a)
-        b = a if trajectories_b is None else self.transform_tensor(trajectories_b)
+        a, b = transform_embedding_pair(self.transform_tensor, trajectories_a, trajectories_b)
         return self.embedding_distance_.kernel(a, b)
 
     def pairwise_kernel(self, trajectories_a: Any, trajectories_b: Any | None = None):
@@ -127,17 +127,39 @@ class KernelMeanEmbedding(TensorOutputMixin):
 
     def pairwise_distance_tensor(self, trajectories_a: Any, trajectories_b: Any | None = None):
         """Kernel-induced trajectory distribution distance."""
-        a = self.transform_tensor(trajectories_a)
-        b = a if trajectories_b is None else self.transform_tensor(trajectories_b)
+        a, b = transform_embedding_pair(self.transform_tensor, trajectories_a, trajectories_b)
         return self.embedding_distance_.distance(a, b)
 
-    def pairwise_distance(self, trajectories_a: Any, trajectories_b: Any | None = None):
-        return self._return(self.pairwise_distance_tensor(trajectories_a, trajectories_b))
-
     def pairwise_similarity_tensor(self, trajectories_a: Any, trajectories_b: Any | None = None):
-        a = self.transform_tensor(trajectories_a)
-        b = a if trajectories_b is None else self.transform_tensor(trajectories_b)
+        a, b = transform_embedding_pair(self.transform_tensor, trajectories_a, trajectories_b)
         return self.embedding_distance_.similarity(a, b)
 
-    def pairwise_similarity(self, trajectories_a: Any, trajectories_b: Any | None = None):
-        return self._return(self.pairwise_similarity_tensor(trajectories_a, trajectories_b))
+
+class KMETrajectoryDelegateMixin(TransformTensorMixin):
+    """Shared delegation for trajectory metrics backed by KernelMeanEmbedding."""
+
+    def _fit_kme(
+        self,
+        base_kernel: StateMetric,
+        trajectories: Any,
+        **kwargs: Any,
+    ) -> KernelMeanEmbedding:
+        self.base_kernel_ = base_kernel
+        self.kme_ = KernelMeanEmbedding(
+            base_kernel,
+            device=self.device,
+            dtype=self.dtype,
+            return_numpy=self.return_numpy,
+            output_format=self.output_format,
+            **kwargs,
+        ).fit(trajectories)
+        return self.kme_
+
+    def transform_tensor(self, trajectories: Any):
+        return self.kme_.transform_tensor(trajectories)
+
+    def pairwise_similarity_tensor(self, A: Any, B: Any | None = None):
+        return self.kme_.pairwise_similarity_tensor(A, B)
+
+    def pairwise_distance_tensor(self, A: Any, B: Any | None = None):
+        return self.kme_.pairwise_distance_tensor(A, B)

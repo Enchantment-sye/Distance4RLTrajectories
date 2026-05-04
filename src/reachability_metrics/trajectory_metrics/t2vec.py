@@ -7,6 +7,7 @@ from typing import Any
 
 import numpy as np
 
+from reachability_metrics.base import TransformTensorMixin
 from reachability_metrics.data import StatePreprocessor
 from reachability_metrics.models.t2vec import T2VecModel
 from reachability_metrics.torch_utils import (
@@ -28,7 +29,7 @@ def _require_torch() -> object:
         raise ModuleNotFoundError("Install reachability-metrics[t2vec] to use T2VecDistance") from exc
 
 
-class T2VecDistance(TrajectoryMetric):
+class T2VecDistance(TransformTensorMixin, TrajectoryMetric):
     """Continuous-state t2vec distance with in-package PyTorch training."""
 
     def __init__(
@@ -256,18 +257,12 @@ class T2VecDistance(TrajectoryMetric):
                 embeddings.append(emb.detach())
         return torch.cat(embeddings, dim=0)
 
-    def transform(self, trajectories: Any):
-        return self._return(self.transform_tensor(trajectories))
-
     def pairwise_distance_tensor(self, A: Any, B: Any | None = None):
         ea = self.transform_tensor(A)
         eb = ea if B is None else self.transform_tensor(B)
         if str(self.distance).lower() == "cosine":
             return cosine_distance_matrix(ea, eb)
         return pairwise_euclidean(ea, eb)
-
-    def pairwise_similarity_tensor(self, A: Any, B: Any | None = None):
-        return -self.pairwise_distance_tensor(A, B)
 
     def save(self, path: str) -> None:
         """Save model, config, and preprocessor."""

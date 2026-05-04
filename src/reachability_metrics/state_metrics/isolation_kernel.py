@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from reachability_metrics.base import TransformTensorMixin
 from reachability_metrics.torch_utils import as_2d_tensor, block_slices, resolve_torch_device
 from .base import StateMetric
 
@@ -71,7 +72,7 @@ class SoftIsolationKernel:
         return self.compute_ik_map(data).mean(dim=0)
 
 
-class IsolationKernelDistance(StateMetric):
+class IsolationKernelDistance(TransformTensorMixin, StateMetric):
     """Isolation Kernel-induced state dissimilarity.
 
     Similarity is ``<phi(x), phi(y)> / ensemble_size`` where each ensemble's
@@ -141,9 +142,6 @@ class IsolationKernelDistance(StateMetric):
                 chunks.append(feat.to(dtype=self._dtype()))
         return torch.cat(chunks, dim=0)
 
-    def transform(self, X: Any, *, normalize: bool = False):
-        return self._return(self.transform_tensor(X, normalize=normalize))
-
     def pairwise_similarity_tensor(self, X: Any, Y: Any | None = None):
         if not hasattr(self, "kernel_"):
             self.fit(X)
@@ -158,9 +156,3 @@ class IsolationKernelDistance(StateMetric):
 
     def pairwise_distance_tensor(self, X: Any, Y: Any | None = None):
         return 1.0 - self.pairwise_similarity_tensor(X, Y)
-
-    def pairwise_similarity(self, X: Any, Y: Any | None = None):
-        return self._return(self.pairwise_similarity_tensor(X, Y))
-
-    def pairwise_distance(self, X: Any, Y: Any | None = None):
-        return self._return(self.pairwise_distance_tensor(X, Y))

@@ -7,7 +7,6 @@ from typing import Any
 
 import numpy as np
 
-from reachability_metrics.data import load_dataset_or_synthetic
 from reachability_metrics.evaluation import (
     auc_from_binary_labels,
     average_precision_from_binary_labels,
@@ -16,10 +15,13 @@ from reachability_metrics.evaluation import (
     safe_pearson,
     safe_spearman,
 )
+from reachability_metrics.experiments._sampling import (
+    load_state_dataset_sample,
+    state_scoring_context,
+)
 from reachability_metrics.experiments.artifacts import ArtifactWriter
 from reachability_metrics.experiments.proxy_ground_truth import empirical_h_reachability_scores
-from reachability_metrics.experiments.scorers import StateScoringContext, build_experiment_scorer
-from reachability_metrics.torch_utils import cpu_numpy
+from reachability_metrics.experiments.scorers import build_experiment_scorer
 from reachability_metrics.utils import dataset_slug
 from reachability_metrics.visualization.plots import plot_alignment_scatter, plot_relabel_bars
 
@@ -61,60 +63,35 @@ class ReachabilityAnalysisConfig:
         return f"{self.output_dir}/figures"
 
 
-def _temporal_scores(episode_ids: np.ndarray, timesteps: np.ndarray, anchors: np.ndarray, candidates: np.ndarray) -> np.ndarray:
-    same = episode_ids[anchors][:, None] == episode_ids[candidates][None, :]
-    delta = timesteps[candidates][None, :] - timesteps[anchors][:, None]
-    valid = same & (delta > 0)
-    scores = np.zeros((anchors.shape[0], candidates.shape[0]), dtype=np.float32)
-    scores[valid] = 1.0 / (1.0 + delta[valid].astype(np.float32))
-    return scores
-
-
 def analyze_single_dataset(dataset_id: str, cfg: ReachabilityAnalysisConfig) -> dict[str, Any]:
     """Run alignment analysis for one dataset."""
 
     rng = np.random.default_rng(cfg.seed)
-    dataset = load_dataset_or_synthetic(
-        dataset_id,
-        minari_datasets_path=cfg.minari_datasets_path,
-        use_achieved_goal=True,
-        synthetic_seed=cfg.seed,
-    )
-    states = cpu_numpy(dataset.states())
-    timesteps = cpu_numpy(dataset.timesteps())
-    episode_ids = cpu_numpy(dataset.episode_ids())
-    episode_lengths = cpu_numpy(dataset.episode_lengths())
-    valid = np.flatnonzero(timesteps < episode_lengths[episode_ids] - cfg.horizon - 1)
-    if valid.size == 0:
-        valid = np.arange(states.shape[0])
-    anchors = rng.choice(valid, size=min(cfg.num_anchors, valid.size), replace=False)
-    candidates = rng.choice(states.shape[0], size=min(cfg.num_candidates, states.shape[0]), replace=False)
-    fit = states[rng.choice(states.shape[0], size=min(cfg.fit_pool_size, states.shape[0]), replace=False)]
+    sample = load_state_dataset_sample(dataset_id, cfg, rng)
     ground_truth = empirical_h_reachability_scores(
-        dataset,
-        anchors,
-        candidates,
+        sample.dataset,
+        sample.anchors,
+        sample.candidates,
         horizon=cfg.horizon,
         hit_radius=cfg.hit_radius,
     )
-    methods = ["euclidean", "gaussian", "adaptive_gaussian", "mahalanobis", "ik", "temporal", "dyn_1"]
+    methods = [
+        "euclidean",
+        "gaussian",
+        "adaptive_gaussian",
+        "mahalanobis",
+        "ik",
+        "temporal",
+        "dyn_1",
+    ]
     rows: list[dict[str, Any]] = []
     per_anchor: list[dict[str, Any]] = []
     first_scatter: str | None = None
-    context = StateScoringContext(
-        fit=fit,
-        states=states,
-        anchors=anchors,
-        candidates=candidates,
-        cfg=cfg,
-        dataset=dataset,
-        episode_ids=episode_ids,
-        timesteps=timesteps,
-    )
+    context = state_scoring_context(sample, cfg)
     for method in methods:
         scores = build_experiment_scorer(method, cfg).score(context)
-        method_rows = []
-        for i in range(anchors.shape[0]):
+        method_rows: list[dict[str, Any]] = []
+        for i in range(sample.anchors.shape[0]):
             labels = (ground_truth[i] >= np.percentile(ground_truth[i], 75.0)).astype(np.int64)
             row = {
                 "dataset": dataset_id,
@@ -166,7 +143,10 @@ def analyze_datasets(cfg: ReachabilityAnalysisConfig) -> dict[str, Any]:
             scatter_paths.append(result["scatter_path"])
     summary_path = artifacts.save_csv("summary.csv", summary_rows)
     per_anchor_path = artifacts.save_csv("per_anchor.csv", per_anchor_rows)
-    bar_path = plot_relabel_bars(summary_rows, artifacts.figure_path(f"alignment_spearman_seed{cfg.seed}.png"))
+    bar_path = plot_relabel_bars(
+        summary_rows,
+        artifacts.figure_path(f"alignment_spearman_seed{cfg.seed}.png"),
+    )
     report_path = artifacts.write_report(
         "Reachability Alignment Report",
         [

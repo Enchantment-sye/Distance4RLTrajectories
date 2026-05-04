@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from reachability_metrics.state_metrics import AdaptiveGaussianDistance
+from .base import TrajectoryMetric
 from .gdk import GDKTrajectoryDistance
 
 
@@ -34,23 +35,19 @@ class AdaptiveGDKTrajectoryDistance(GDKTrajectoryDistance):
     def fit(self, trajectories: Any, y: Any = None) -> "AdaptiveGDKTrajectoryDistance":
         import torch
 
-        super(GDKTrajectoryDistance, self).fit(trajectories, y)
+        TrajectoryMetric.fit(self, trajectories, y)
         states = torch.cat(self.trajectories_, dim=0)
-        self.base_kernel_ = AdaptiveGaussianDistance(
+        base_kernel = AdaptiveGaussianDistance(
             k=self.k,
             eps=self.eps,
             distance_mode="one_minus_kernel",
             device=self.device,
             dtype=self.dtype,
         ).fit(states)
-        from .kme import KernelMeanEmbedding
 
-        self.kme_ = KernelMeanEmbedding(
-            self.base_kernel_,
+        self._fit_kme(
+            base_kernel,
+            self.trajectories_,
             distance_mode=self.distance_mode,
-            device=self.device,
-            dtype=self.dtype,
-            return_numpy=self.return_numpy,
-            output_format=self.output_format,
-        ).fit(self.trajectories_)
+        )
         return self

@@ -4,10 +4,15 @@ from __future__ import annotations
 
 from typing import Any
 
-from reachability_metrics.aggregation import build_aggregation
+from reachability_metrics.aggregation import (
+    aggregate_groupwise_distances,
+    build_aggregation,
+    pairwise_embedding_distance_tensor,
+    transform_tensor,
+    transform_groups_tensor,
+)
 from reachability_metrics.base import PairwiseTensorMetricMixin
 from reachability_metrics.state_metrics import GaussianKernelDistance
-from reachability_metrics.torch_utils import as_tensor, require_torch
 from reachability_metrics.trajectory_metrics import GDKTrajectoryDistance
 from reachability_metrics.trajectory_metrics.kme import KernelMeanEmbedding
 
@@ -48,9 +53,7 @@ class TrajectoryToSetDistance(PairwiseTensorMetricMixin):
         return self
 
     def _fit_two_level(self, trajectory_sets: list[list[Any]]) -> None:
-        group_points = []
-        for group in trajectory_sets:
-            group_points.append(self.trajectory_metric_.transform_tensor(group))
+        group_points = transform_groups_tensor(self.trajectory_metric_, trajectory_sets)
         kernel = self.second_level_kernel or GaussianKernelDistance()
         self.second_level_kme_ = KernelMeanEmbedding(
             kernel,
@@ -60,28 +63,23 @@ class TrajectoryToSetDistance(PairwiseTensorMetricMixin):
         self.set_embeddings_ = self.second_level_kme_.transform_tensor(group_points)
 
     def _aggregate_distance_tensor(self, trajectories: Any, trajectory_sets: list[list[Any]] | None = None):
-        torch = require_torch()
         sets = self.trajectory_sets_ if trajectory_sets is None else trajectory_sets
-        rows = []
-        for group in sets:
-            d = as_tensor(self.trajectory_metric_.pairwise_distance(trajectories, group))
-            rows.append(self.aggregation_strategy_.reduce(d, dim=1))
-        return torch.stack(rows, dim=1)
+        return aggregate_groupwise_distances(
+            self.trajectory_metric_,
+            trajectories,
+            sets,
+            self.aggregation_strategy_,
+        )
 
     def _two_level_distance_tensor(self, trajectories: Any, trajectory_sets: list[list[Any]] | None = None):
-        torch = require_torch()
-        q_points = self.trajectory_metric_.transform_tensor(trajectories)
+        q_points = transform_tensor(self.trajectory_metric_, trajectories)
         q_emb = self.second_level_kme_.transform_tensor([point.reshape(1, -1) for point in q_points])
         if trajectory_sets is None:
             set_emb = self.set_embeddings_
         else:
-            group_points = [self.trajectory_metric_.transform_tensor(group) for group in trajectory_sets]
+            group_points = transform_groups_tensor(self.trajectory_metric_, trajectory_sets)
             set_emb = self.second_level_kme_.transform_tensor(group_points)
-        if str(self.distance_mode).lower() == "cosine":
-            from reachability_metrics.torch_utils import cosine_distance_matrix
-
-            return cosine_distance_matrix(q_emb, set_emb)
-        return torch.sqrt(torch.clamp(torch.sum(q_emb * q_emb, dim=1, keepdim=True) + torch.sum(set_emb * set_emb, dim=1, keepdim=True).T - 2.0 * q_emb @ set_emb.T, min=0.0))
+        return pairwise_embedding_distance_tensor(q_emb, set_emb, self.distance_mode)
 
     def pairwise_distance_tensor(self, trajectories: Any, trajectory_sets: list[list[Any]] | None = None):
         if str(self.method).lower() == "two_level_kme":

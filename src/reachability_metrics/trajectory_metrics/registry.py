@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
+from reachability_metrics.registry import MetricRegistry
+
 from .adaptive_gdk import AdaptiveGDKTrajectoryDistance
 from .dtw import DTWDistance
 from .euclidean import TrajectoryEuclideanDistance
@@ -29,14 +31,9 @@ TRAJECTORY_METRIC_REGISTRY: dict[str, Callable[..., Any]] = {
     "t2vec": T2VecDistance,
 }
 
+_TRAJECTORY_METRIC_FACTORY = MetricRegistry("trajectory metric", TRAJECTORY_METRIC_REGISTRY)
+
 
 def build_trajectory_metric(method: str, **kwargs: Any) -> Any:
     """Construct a trajectory metric from a public method key."""
-    key = str(method).lower()
-    try:
-        factory = TRAJECTORY_METRIC_REGISTRY[key]
-    except KeyError as exc:
-        options = ", ".join(sorted(TRAJECTORY_METRIC_REGISTRY))
-        raise ValueError(f"Unknown trajectory metric '{method}'. Available: {options}") from exc
-    return factory(**kwargs)
-
+    return _TRAJECTORY_METRIC_FACTORY.build(method, **kwargs)

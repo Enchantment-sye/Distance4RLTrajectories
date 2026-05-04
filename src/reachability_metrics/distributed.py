@@ -9,6 +9,7 @@ algorithm.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -21,6 +22,33 @@ from reachability_metrics.torch_utils import (
     resolve_torch_device,
     torch_dtype,
 )
+
+
+@dataclass(frozen=True)
+class _PairwisePlan:
+    dist: Any | None
+    group: Any | None
+    rank: int
+    world_size: int
+    gather_mode: str
+    A_full: Any
+    B_full: Any
+    context: dict[str, Any]
+    start: int
+    end: int
+    shape: tuple[int, int]
+
+
+@dataclass(frozen=True)
+class _TopKSpec:
+    op: str
+    k: int
+    exclude_self: bool
+    sorted: bool
+
+    @property
+    def largest(self) -> bool:
+        return self.op == "similarity"
 
 
 def distributed_pairwise_distance(
@@ -106,93 +134,43 @@ def distributed_topk(
     ``op="similarity"`` returns largest similarities.
     """
 
-    torch = require_torch()
-    op_key = str(op).lower()
-    if op_key in {"pairwise_distance", "topk_distance"}:
-        op_key = "distance"
-    if op_key in {"pairwise_similarity", "topk_similarity"}:
-        op_key = "similarity"
-    if op_key not in {"distance", "similarity"}:
-        raise ValueError("op must be 'distance' or 'similarity'")
-    if int(k) <= 0:
-        raise ValueError("k must be positive")
-    if exclude_self and B is not None:
-        raise ValueError("exclude_self=True requires B=None")
-
-    dist, group, rank, world_size = _distributed_context(
+    op_key = _normalize_topk_op(op)
+    _validate_topk_request(k, exclude_self, B)
+    plan = _prepare_pairwise_plan(
+        metric,
+        A,
+        B,
+        gather=gather,
         process_group=process_group,
         init_process_group=init_process_group,
         backend=backend,
     )
-    gather_mode = _normalize_gather(gather)
-    A_full, B_full, context = _resolve_inputs(metric, A, B)
-    _validate_metric_safe(metric, A_full, B_full)
-    n_rows = _num_rows(A_full)
-    n_cols = _num_rows(B_full)
-    if n_cols <= 0:
-        raise ValueError("top-k requires at least one column")
-    k_eff = min(int(k), n_cols - (1 if exclude_self else 0))
-    if k_eff <= 0:
-        raise ValueError("top-k has no valid columns after exclude_self")
+    spec = _topk_spec(op_key, k, exclude_self, sorted, plan.shape[1])
+    local_values, local_indices = _compute_local_topk(metric, plan, spec, row_block_size)
 
-    start, end = _rank_range(n_rows, rank, world_size)
-    chunks_v = []
-    chunks_i = []
-    local_values = None
-    local_indices = None
-    if _use_cpu_exact(A_full, B_full, metric):
-        full_values = _compute_pairwise_tensor(metric, A_full, B_full, op_key, context, 0, n_rows)
-        if exclude_self:
-            fill = float("inf") if op_key == "distance" else float("-inf")
-            diag = torch.arange(min(full_values.shape), dtype=torch.long, device=full_values.device)
-            full_values[diag, diag] = fill
-        local_values_all, local_indices_all = torch.topk(
-            full_values,
-            k=k_eff,
-            dim=1,
-            largest=(op_key == "similarity"),
-            sorted=bool(sorted),
+    if plan.gather_mode == "none":
+        return _convert_output(
+            metric,
+            (local_values, local_indices, *_plan_metadata(plan)),
+            output_format,
+            return_numpy,
         )
-        local_values = local_values_all[start:end]
-        local_indices = local_indices_all[start:end].to(torch.long)
-    elif end > start:
-        for rel_start, rel_end in block_slices(end - start, _effective_block_size(row_block_size, metric, end - start)):
-            global_start = start + rel_start
-            global_end = start + rel_end
-            A_block = _slice_rows(A_full, global_start, global_end)
-            values = _compute_pairwise_tensor(metric, A_block, B_full, op_key, context, global_start, global_end)
-            if exclude_self:
-                fill = float("inf") if op_key == "distance" else float("-inf")
-                diag_cols = torch.arange(global_start, global_end, dtype=torch.long, device=values.device)
-                valid = diag_cols < values.shape[1]
-                if bool(torch.any(valid)):
-                    rows = torch.arange(values.shape[0], dtype=torch.long, device=values.device)[valid]
-                    values[rows, diag_cols[valid]] = fill
-            vals, idx = torch.topk(
-                values,
-                k=k_eff,
-                dim=1,
-                largest=(op_key == "similarity"),
-                sorted=bool(sorted),
-            )
-            chunks_v.append(vals)
-            chunks_i.append(idx.to(torch.long))
-    if local_values is not None and local_indices is not None:
-        pass
-    elif chunks_v:
-        local_values = torch.cat(chunks_v, dim=0)
-        local_indices = torch.cat(chunks_i, dim=0)
-    else:
-        device = _infer_device(metric, A_full, B_full)
-        dtype = _infer_dtype(metric, A_full, B_full)
-        local_values = torch.empty((0, k_eff), dtype=dtype, device=device)
-        local_indices = torch.empty((0, k_eff), dtype=torch.long, device=device)
-
-    metadata = (start, end, (n_rows, n_cols))
-    if gather_mode == "none":
-        return _convert_output(metric, (local_values, local_indices, *metadata), output_format, return_numpy)
-    values = _gather_tensor(local_values, dist, group, rank, world_size, gather_mode)
-    indices = _gather_tensor(local_indices, dist, group, rank, world_size, gather_mode)
+    values = _gather_tensor(
+        local_values,
+        plan.dist,
+        plan.group,
+        plan.rank,
+        plan.world_size,
+        plan.gather_mode,
+    )
+    indices = _gather_tensor(
+        local_indices,
+        plan.dist,
+        plan.group,
+        plan.rank,
+        plan.world_size,
+        plan.gather_mode,
+    )
     if values is None or indices is None:
         return None
     return _convert_output(metric, (values, indices), output_format, return_numpy)
@@ -212,22 +190,75 @@ def _distributed_pairwise(
     output_format: str | None,
     return_numpy: bool,
 ) -> Any:
+    plan = _prepare_pairwise_plan(
+        metric,
+        A,
+        B,
+        gather=gather,
+        process_group=process_group,
+        init_process_group=init_process_group,
+        backend=backend,
+    )
+    local = _compute_local_pairwise(
+        metric,
+        plan.A_full,
+        plan.B_full,
+        op,
+        plan.context,
+        plan.start,
+        plan.end,
+        row_block_size,
+    )
+    if plan.gather_mode == "none":
+        return _convert_output(metric, (local, *_plan_metadata(plan)), output_format, return_numpy)
+    result = _gather_tensor(
+        local,
+        plan.dist,
+        plan.group,
+        plan.rank,
+        plan.world_size,
+        plan.gather_mode,
+    )
+    return None if result is None else _convert_output(metric, result, output_format, return_numpy)
+
+
+def _prepare_pairwise_plan(
+    metric: Any,
+    A: Any | None,
+    B: Any | None,
+    *,
+    gather: bool | str,
+    process_group: Any | None,
+    init_process_group: bool,
+    backend: str | None,
+) -> _PairwisePlan:
     dist, group, rank, world_size = _distributed_context(
         process_group=process_group,
         init_process_group=init_process_group,
         backend=backend,
     )
-    gather_mode = _normalize_gather(gather)
     A_full, B_full, context = _resolve_inputs(metric, A, B)
     _validate_metric_safe(metric, A_full, B_full)
     n_rows = _num_rows(A_full)
     n_cols = _num_rows(B_full)
     start, end = _rank_range(n_rows, rank, world_size)
-    local = _compute_local_pairwise(metric, A_full, B_full, op, context, start, end, row_block_size)
-    if gather_mode == "none":
-        return _convert_output(metric, (local, start, end, (n_rows, n_cols)), output_format, return_numpy)
-    result = _gather_tensor(local, dist, group, rank, world_size, gather_mode)
-    return None if result is None else _convert_output(metric, result, output_format, return_numpy)
+    return _PairwisePlan(
+        dist=dist,
+        group=group,
+        rank=rank,
+        world_size=world_size,
+        gather_mode=_normalize_gather(gather),
+        A_full=A_full,
+        B_full=B_full,
+        context=context,
+        start=start,
+        end=end,
+        shape=(n_rows, n_cols),
+    )
+
+
+def _plan_metadata(plan: _PairwisePlan) -> tuple[int, int, tuple[int, int]]:
+    return plan.start, plan.end, plan.shape
 
 
 def _distributed_context(
@@ -265,6 +296,33 @@ def _normalize_gather(gather: bool | str) -> str:
     if key in {"all", "rank0", "none"}:
         return key
     raise ValueError("gather must be True, False, 'all', 'rank0', or 'none'")
+
+
+def _normalize_topk_op(op: str) -> str:
+    op_key = str(op).lower()
+    if op_key in {"pairwise_distance", "topk_distance"}:
+        return "distance"
+    if op_key in {"pairwise_similarity", "topk_similarity"}:
+        return "similarity"
+    if op_key in {"distance", "similarity"}:
+        return op_key
+    raise ValueError("op must be 'distance' or 'similarity'")
+
+
+def _validate_topk_request(k: int, exclude_self: bool, B: Any | None) -> None:
+    if int(k) <= 0:
+        raise ValueError("k must be positive")
+    if exclude_self and B is not None:
+        raise ValueError("exclude_self=True requires B=None")
+
+
+def _topk_spec(op: str, k: int, exclude_self: bool, sorted: bool, n_cols: int) -> _TopKSpec:
+    if n_cols <= 0:
+        raise ValueError("top-k requires at least one column")
+    k_eff = min(int(k), n_cols - (1 if exclude_self else 0))
+    if k_eff <= 0:
+        raise ValueError("top-k has no valid columns after exclude_self")
+    return _TopKSpec(op=op, k=k_eff, exclude_self=bool(exclude_self), sorted=bool(sorted))
 
 
 def _rank_range(n_rows: int, rank: int, world_size: int) -> tuple[int, int]:
@@ -349,18 +407,117 @@ def _compute_local_pairwise(
         full = _compute_pairwise_tensor(metric, A_full, B_full, op, context, 0, _num_rows(A_full))
         return full[start:end]
     chunks = []
-    if end > start:
-        for rel_start, rel_end in block_slices(end - start, _effective_block_size(row_block_size, metric, end - start)):
-            global_start = start + rel_start
-            global_end = start + rel_end
-            A_block = _slice_rows(A_full, global_start, global_end)
-            chunks.append(_compute_pairwise_tensor(metric, A_block, B_full, op, context, global_start, global_end))
+    for global_start, global_end, A_block in _iter_row_blocks(A_full, metric, start, end, row_block_size):
+        chunks.append(_compute_pairwise_tensor(metric, A_block, B_full, op, context, global_start, global_end))
     if chunks:
         return torch.cat(chunks, dim=0)
     return torch.empty(
         (0, _num_rows(B_full)),
         dtype=_infer_dtype(metric, A_full, B_full),
         device=_infer_device(metric, A_full, B_full),
+    )
+
+
+def _compute_local_topk(
+    metric: Any,
+    plan: _PairwisePlan,
+    spec: _TopKSpec,
+    row_block_size: int | None,
+) -> tuple[Any, Any]:
+    torch = require_torch()
+    if _use_cpu_exact(plan.A_full, plan.B_full, metric):
+        full_values = _compute_pairwise_tensor(
+            metric,
+            plan.A_full,
+            plan.B_full,
+            spec.op,
+            plan.context,
+            0,
+            plan.shape[0],
+        )
+        _mask_excluded_self(full_values, spec, row_start=0)
+        values, indices = _topk_from_values(full_values, spec)
+        return values[plan.start : plan.end], indices[plan.start : plan.end]
+
+    chunks_v = []
+    chunks_i = []
+    for global_start, global_end, A_block in _iter_row_blocks(
+        plan.A_full,
+        metric,
+        plan.start,
+        plan.end,
+        row_block_size,
+    ):
+        values = _compute_pairwise_tensor(
+            metric,
+            A_block,
+            plan.B_full,
+            spec.op,
+            plan.context,
+            global_start,
+            global_end,
+        )
+        _mask_excluded_self(values, spec, row_start=global_start)
+        vals, idx = _topk_from_values(values, spec)
+        chunks_v.append(vals)
+        chunks_i.append(idx)
+    if chunks_v:
+        return torch.cat(chunks_v, dim=0), torch.cat(chunks_i, dim=0)
+    return _empty_topk_tensors(metric, plan.A_full, plan.B_full, spec.k)
+
+
+def _iter_row_blocks(
+    A_full: Any,
+    metric: Any,
+    start: int,
+    end: int,
+    row_block_size: int | None,
+) -> Any:
+    if end <= start:
+        return
+    block_size = _effective_block_size(row_block_size, metric, end - start)
+    for rel_start, rel_end in block_slices(end - start, block_size):
+        global_start = start + rel_start
+        global_end = start + rel_end
+        yield global_start, global_end, _slice_rows(A_full, global_start, global_end)
+
+
+def _topk_from_values(values: Any, spec: _TopKSpec) -> tuple[Any, Any]:
+    torch = require_torch()
+    vals, idx = torch.topk(
+        values,
+        k=spec.k,
+        dim=1,
+        largest=spec.largest,
+        sorted=spec.sorted,
+    )
+    return vals, idx.to(torch.long)
+
+
+def _mask_excluded_self(values: Any, spec: _TopKSpec, *, row_start: int) -> None:
+    if not spec.exclude_self:
+        return
+    torch = require_torch()
+    fill = float("-inf") if spec.largest else float("inf")
+    diag_cols = torch.arange(
+        int(row_start),
+        int(row_start) + int(values.shape[0]),
+        dtype=torch.long,
+        device=values.device,
+    )
+    valid = diag_cols < values.shape[1]
+    if bool(torch.any(valid)):
+        rows = torch.arange(values.shape[0], dtype=torch.long, device=values.device)[valid]
+        values[rows, diag_cols[valid]] = fill
+
+
+def _empty_topk_tensors(metric: Any, A_full: Any, B_full: Any, k: int) -> tuple[Any, Any]:
+    torch = require_torch()
+    device = _infer_device(metric, A_full, B_full)
+    dtype = _infer_dtype(metric, A_full, B_full)
+    return (
+        torch.empty((0, int(k)), dtype=dtype, device=device),
+        torch.empty((0, int(k)), dtype=torch.long, device=device),
     )
 
 

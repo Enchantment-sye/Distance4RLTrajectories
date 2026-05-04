@@ -6,6 +6,7 @@ from typing import Any
 
 from reachability_metrics.torch_utils import pairwise_sqeuclidean, require_torch
 from .base import StateMetric
+from .kernel_modes import kernel_distance_from_similarity
 
 
 class GaussianKernelDistance(StateMetric):
@@ -74,11 +75,5 @@ class GaussianKernelDistance(StateMetric):
         return torch.exp(-(sq / (2.0 * self.sigma_ * self.sigma_)))
 
     def pairwise_distance_tensor(self, X: Any, Y: Any | None = None):
-        torch = require_torch()
         k = self.pairwise_similarity_tensor(X, Y)
-        mode = str(self.distance_mode).lower()
-        if mode == "rkhs":
-            return torch.sqrt(torch.clamp(2.0 - 2.0 * k, min=0.0))
-        if mode in {"one_minus_kernel", "1-k"}:
-            return 1.0 - k
-        raise ValueError(f"Unsupported distance_mode: {self.distance_mode}")
+        return kernel_distance_from_similarity(k, self.distance_mode, rkhs_modes=("rkhs",))

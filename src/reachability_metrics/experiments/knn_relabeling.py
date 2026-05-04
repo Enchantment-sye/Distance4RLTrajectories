@@ -8,12 +8,19 @@ from typing import Any
 import numpy as np
 from scipy.spatial.distance import cdist
 
-from reachability_metrics.data import load_dataset_or_synthetic
 from reachability_metrics.evaluation import ndcg_at_k, safe_spearman
-from reachability_metrics.evaluation.relabeling import diversity_at_k, goal_precision_at_k, mean_gt_score_at_k, unique_goal_ratio_at_k
+from reachability_metrics.evaluation.relabeling import (
+    diversity_at_k,
+    goal_precision_at_k,
+    mean_gt_score_at_k,
+    unique_goal_ratio_at_k,
+)
+from reachability_metrics.experiments._sampling import (
+    load_state_dataset_sample,
+    state_scoring_context,
+)
 from reachability_metrics.experiments.artifacts import ArtifactWriter
-from reachability_metrics.experiments.scorers import StateScoringContext, build_experiment_scorer
-from reachability_metrics.torch_utils import cpu_numpy
+from reachability_metrics.experiments.scorers import build_experiment_scorer
 from reachability_metrics.utils import dataset_slug
 from reachability_metrics.visualization.maze import plot_topk_goals_on_maze
 from reachability_metrics.visualization.plots import plot_relabel_bars
@@ -56,7 +63,14 @@ class KNNRelabelConfig:
         return f"{self.output_dir}/figures"
 
 
-def _reachability_gt(states: np.ndarray, episode_ids: np.ndarray, timesteps: np.ndarray, anchors: np.ndarray, candidates: np.ndarray, horizon: int) -> np.ndarray:
+def _reachability_gt(
+    states: np.ndarray,
+    episode_ids: np.ndarray,
+    timesteps: np.ndarray,
+    anchors: np.ndarray,
+    candidates: np.ndarray,
+    horizon: int,
+) -> np.ndarray:
     gt = np.zeros((anchors.shape[0], candidates.shape[0]), dtype=np.float32)
     candidate_pos = states[candidates]
     for i, aidx in enumerate(anchors):
@@ -73,15 +87,6 @@ def _reachability_gt(states: np.ndarray, episode_ids: np.ndarray, timesteps: np.
     return gt
 
 
-def _temporal_scores(episode_ids: np.ndarray, timesteps: np.ndarray, anchors: np.ndarray, candidates: np.ndarray) -> np.ndarray:
-    same = episode_ids[anchors][:, None] == episode_ids[candidates][None, :]
-    delta = timesteps[candidates][None, :] - timesteps[anchors][:, None]
-    valid = same & (delta > 0)
-    scores = np.zeros((anchors.shape[0], candidates.shape[0]), dtype=np.float32)
-    scores[valid] = 1.0 / (1.0 + delta[valid].astype(np.float32))
-    return scores
-
-
 def run_relabel_benchmark(cfg: KNNRelabelConfig, dataset_id: str | None = None) -> dict[str, Any]:
     """Run relabeling for one or more datasets."""
     artifacts = ArtifactWriter(cfg.output_dir, cfg.cache_dir).prepare()
@@ -90,30 +95,30 @@ def run_relabel_benchmark(cfg: KNNRelabelConfig, dataset_id: str | None = None) 
     summary_rows: list[dict[str, Any]] = []
     per_anchor_rows: list[dict[str, Any]] = []
     for ds in datasets:
-        dataset = load_dataset_or_synthetic(ds, minari_datasets_path=cfg.minari_datasets_path, use_achieved_goal=True, synthetic_seed=cfg.seed)
-        states = cpu_numpy(dataset.states())
-        episode_ids = cpu_numpy(dataset.episode_ids())
-        timesteps = cpu_numpy(dataset.timesteps())
-        episode_lengths = cpu_numpy(dataset.episode_lengths())
-        valid = np.flatnonzero(timesteps < episode_lengths[episode_ids] - cfg.horizon - 1)
-        if valid.size == 0:
-            valid = np.arange(states.shape[0])
-        anchors = rng.choice(valid, size=min(cfg.num_anchors, valid.size), replace=False)
-        candidates = rng.choice(states.shape[0], size=min(cfg.num_candidates, states.shape[0]), replace=False)
-        fit = states[rng.choice(states.shape[0], size=min(cfg.fit_pool_size, states.shape[0]), replace=False)]
-        gt = _reachability_gt(states, episode_ids, timesteps, anchors, candidates, cfg.horizon)
-        geo = np.linalg.norm(states[anchors][:, None, :2] - states[candidates][None, :, :2], axis=-1)
-        methods = ["euclidean", "gaussian", "mahalanobis", "adaptive_gaussian", "ik", "temporal_distance", "one_step_dynamics"]
-        context = StateScoringContext(
-            fit=fit,
-            states=states,
-            anchors=anchors,
-            candidates=candidates,
-            cfg=cfg,
-            dataset=dataset,
-            episode_ids=episode_ids,
-            timesteps=timesteps,
+        sample = load_state_dataset_sample(ds, cfg, rng)
+        gt = _reachability_gt(
+            sample.states,
+            sample.episode_ids,
+            sample.timesteps,
+            sample.anchors,
+            sample.candidates,
+            cfg.horizon,
         )
+        geo = np.linalg.norm(
+            sample.states[sample.anchors][:, None, :2]
+            - sample.states[sample.candidates][None, :, :2],
+            axis=-1,
+        )
+        methods = [
+            "euclidean",
+            "gaussian",
+            "mahalanobis",
+            "adaptive_gaussian",
+            "ik",
+            "temporal_distance",
+            "one_step_dynamics",
+        ]
+        context = state_scoring_context(sample, cfg)
         plot_scores: np.ndarray | None = None
         for method in methods:
             scores = build_experiment_scorer(method, cfg).score(context)
@@ -123,7 +128,7 @@ def run_relabel_benchmark(cfg: KNNRelabelConfig, dataset_id: str | None = None) 
             if method == "ik":
                 plot_scores = scores
             rows = []
-            for i in range(anchors.shape[0]):
+            for i in range(sample.anchors.shape[0]):
                 labels = (gt[i] > np.percentile(gt[i], 75.0)).astype(np.int64)
                 row = {
                     "dataset": ds,
@@ -134,8 +139,16 @@ def run_relabel_benchmark(cfg: KNNRelabelConfig, dataset_id: str | None = None) 
                     "goal_precision_at_k": goal_precision_at_k(labels, scores[i], cfg.top_k),
                     "mean_gt_reachability": mean_gt_score_at_k(gt[i], scores[i], cfg.top_k),
                     "mean_geodesic": float(np.mean(geo[i][np.argsort(-scores[i])[: cfg.top_k]])),
-                    "diversity": diversity_at_k(states[candidates, :2], scores[i], cfg.top_k),
-                    "unique_goal_ratio": unique_goal_ratio_at_k(states[candidates, :2], scores[i], cfg.top_k),
+                    "diversity": diversity_at_k(
+                        sample.states[sample.candidates, :2],
+                        scores[i],
+                        cfg.top_k,
+                    ),
+                    "unique_goal_ratio": unique_goal_ratio_at_k(
+                        sample.states[sample.candidates, :2],
+                        scores[i],
+                        cfg.top_k,
+                    ),
                 }
                 rows.append(row)
                 per_anchor_rows.append(row)
@@ -151,15 +164,18 @@ def run_relabel_benchmark(cfg: KNNRelabelConfig, dataset_id: str | None = None) 
             })
         if plot_scores is not None:
             plot_topk_goals_on_maze(
-                states[anchors[0], :2],
-                states[candidates, :2],
+                sample.states[sample.anchors[0], :2],
+                sample.states[sample.candidates, :2],
                 plot_scores[0],
                 artifacts.figure_path(f"{dataset_slug(ds)}_ik_topk_seed{cfg.seed}.png"),
                 cfg.top_k,
             )
     summary_path = artifacts.save_csv("summary.csv", summary_rows)
     per_anchor_path = artifacts.save_csv("per_anchor.csv", per_anchor_rows)
-    fig_path = plot_relabel_bars(summary_rows, artifacts.figure_path(f"relabel_bars_seed{cfg.seed}.png"))
+    fig_path = plot_relabel_bars(
+        summary_rows,
+        artifacts.figure_path(f"relabel_bars_seed{cfg.seed}.png"),
+    )
     report_path = artifacts.write_report(
         "kNN Relabeling Report",
         [
@@ -167,4 +183,10 @@ def run_relabel_benchmark(cfg: KNNRelabelConfig, dataset_id: str | None = None) 
             f"- figure: `{fig_path}`",
         ],
     )
-    return {"summary_rows": summary_rows, "per_anchor_rows": per_anchor_rows, "summary_path": summary_path, "per_anchor_path": per_anchor_path, "report_path": report_path}
+    return {
+        "summary_rows": summary_rows,
+        "per_anchor_rows": per_anchor_rows,
+        "summary_path": summary_path,
+        "per_anchor_path": per_anchor_path,
+        "report_path": report_path,
+    }

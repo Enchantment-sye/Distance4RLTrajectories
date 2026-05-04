@@ -29,6 +29,13 @@ class TensorOutputMixin:
         return maybe_numpy(value, output_format=self._output_format())
 
 
+class TransformTensorMixin(TensorOutputMixin):
+    """Template method for estimators exposing a tensor transform path."""
+
+    def transform(self, *args: Any, **kwargs: Any) -> Any:
+        return self._return(self.transform_tensor(*args, **kwargs))
+
+
 class PairwiseTensorMetricMixin(TensorOutputMixin):
     """Template methods for pairwise tensor metrics.
 

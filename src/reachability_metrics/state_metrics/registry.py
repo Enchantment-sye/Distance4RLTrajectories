@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
+from reachability_metrics.registry import MetricRegistry
+
 from .adaptive_gaussian import AdaptiveGaussianDistance
 from .euclidean import EuclideanDistance
 from .gaussian import GaussianKernelDistance
@@ -27,14 +29,9 @@ STATE_METRIC_REGISTRY: dict[str, Callable[..., Any]] = {
     "temporal_distance": TemporalDistance,
 }
 
+_STATE_METRIC_FACTORY = MetricRegistry("state metric", STATE_METRIC_REGISTRY)
+
 
 def build_state_metric(method: str, **kwargs: Any) -> Any:
     """Construct a state metric from a public method key."""
-    key = str(method).lower()
-    try:
-        factory = STATE_METRIC_REGISTRY[key]
-    except KeyError as exc:
-        options = ", ".join(sorted(STATE_METRIC_REGISTRY))
-        raise ValueError(f"Unknown state metric '{method}'. Available: {options}") from exc
-    return factory(**kwargs)
-
+    return _STATE_METRIC_FACTORY.build(method, **kwargs)
